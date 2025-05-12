@@ -4,10 +4,11 @@ from utils.group_activity import group_activity_manager
 from llm import process_conversation
 import time
 import updater
+import threading
 
 def main():
-    # 首先检查更新
-    updater.check_and_update()
+    # 检查更新（异步）
+    threading.Thread(target=updater.check_and_update, daemon=True).start()
 
     # 初始化消息记录数据库
     print("🚀 初始化数据库...")
