@@ -14,40 +14,31 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # 获取所有历史记录，以便访问所有标签
+          fetch-depth: 0  # Fetch all history including tags
 
       - name: Get latest version tag
         id: get_version
         run: |
-          # 从远程获取所有标签，以防本地不是最新的
+          # Fetch all tags to ensure we have the latest list
           git fetch --tags --force
           
-          # 获取最新的符合 SemVer (vX.Y.Z) 格式的标签
-          # 如果没有找到，默认为 v0.0.0，这样第一次运行时会生成 v0.0.1
+          # Obtain the latest SemVer tag (vX.Y.Z). Default to v0.0.0 if none found
           LATEST_TAG=$(git tag -l "v[0-9]*.[0-9]*.[0-9]*" | sort -V | tail -n 1)
           if [ -z "$LATEST_TAG" ]; then
             LATEST_TAG="v0.0.0"
           fi
           echo "Latest tag is: $LATEST_TAG"
-          # 将 latest_tag 设置为后续步骤的输出变量
           echo "latest_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Calculate next version
         id: calc_version
         run: |
           LATEST_TAG="${{ steps.get_version.outputs.latest_tag }}"
-          # 移除 'v' 前缀，例如 "v1.2.3" -> "1.2.3"
-          VERSION_CORE=${LATEST_TAG#v}
-          
-          # 将版本号分割为 MAJOR, MINOR, PATCH
+          VERSION_CORE=${LATEST_TAG#v}      # Strip the 'v' prefix
           IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION_CORE"
-          
-          # 递增 PATCH 版本号
           NEW_PATCH=$((PATCH + 1))
-          
           NEW_TAG="v${MAJOR}.${MINOR}.${NEW_PATCH}"
           echo "Calculated new tag: $NEW_TAG"
-          # 将 new_tag 设置为后续步骤的输出变量
           echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Create and push new tag
@@ -55,7 +46,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           NEW_TAG="${{ steps.calc_version.outputs.new_tag }}"
-          # 配置 git 用户信息，推送标签时可能需要
+          # Configure git for the GitHub Actions bot
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
@@ -69,55 +60,41 @@ jobs:
           LATEST_TAG="${{ steps.get_version.outputs.latest_tag }}"
           NEW_TAG="${{ steps.calc_version.outputs.new_tag }}"
           
-          echo "Generating release notes between $LATEST_TAG and $NEW_TAG"
-          
-          COMMIT_LOG=""
-          RAW_MARKDOWN_NOTES=""
-          if [ "$LATEST_TAG" == "v0.0.0" ]; then
+          if [ "$LATEST_TAG" = "v0.0.0" ]; then
+            # First automated release – include complete history
             COMMIT_LOG=$(git log --pretty=format:"* %s (%h) by @%an" HEAD)
             RAW_MARKDOWN_NOTES="## Release $NEW_TAG 🎉\n\nThis is the first automated release!\n\n### Changes\n$COMMIT_LOG\n\nThanks to all contributors!"
           else
-            COMMIT_LOG=$(git log --pretty=format:"* %s (%h) by @%an" $LATEST_TAG..HEAD)
+            COMMIT_LOG=$(git log --pretty=format:"* %s (%h) by @%an" "$LATEST_TAG"..HEAD)
             RAW_MARKDOWN_NOTES="## Release $NEW_TAG 🎉\n\nThis release includes the following changes since $LATEST_TAG:\n\n### Changes\n$COMMIT_LOG\n\nThanks to all contributors!"
           fi
           
-          # For GITHUB_OUTPUT, encode newlines etc. so Actions can pass it to the next step correctly
+          # Encode newlines for safe step outputs
           ENCODED_FOR_GITHUB_OUTPUT="${RAW_MARKDOWN_NOTES//'%'/'%25'}"
           ENCODED_FOR_GITHUB_OUTPUT="${ENCODED_FOR_GITHUB_OUTPUT//$'\n'/'%0A'}"
           ENCODED_FOR_GITHUB_OUTPUT="${ENCODED_FOR_GITHUB_OUTPUT//$'\r'/'%0D'}"
-          echo "release_notes_for_step_output=$ENCODED_FOR_GITHUB_OUTPUT" >> "$GITHUB_OUTPUT"
-          
-          echo "Raw markdown notes generated:"
-          echo "$RAW_MARKDOWN_NOTES"
+          echo "release_notes=$ENCODED_FOR_GITHUB_OUTPUT" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release via API
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           NEW_TAG="${{ steps.calc_version.outputs.new_tag }}"
-          RAW_NOTES_FROM_PREVIOUS_STEP="${{ steps.generate_release_notes.outputs.release_notes_for_step_output }}"
+          # GitHub automatically decodes the %0A back to real newlines when the output is read
+          RAW_NOTES="${{ steps.generate_release_notes.outputs.release_notes }}"
+          
+          # Build JSON payload safely with jq to avoid manual escaping
+          API_JSON_PAYLOAD=$(jq -n --arg tag_name "$NEW_TAG" \
+                                   --arg name "Release $NEW_TAG" \
+                                   --arg body "$RAW_NOTES" \
+                                   '{ tag_name: $tag_name,
+                                      name: $name,
+                                      body: $body,
+                                      draft: false,
+                                      prerelease: false }')
 
           echo "Creating release $NEW_TAG via GitHub API"
-          
-          # 使用 jq 构建整个 JSON payload
-          # --arg会将shell变量作为JSON字符串传递给jq查询
-          # -n 表示不读取任何输入，而是从参数构建JSON
-          API_JSON_PAYLOAD=$(jq -n \
-            --arg tag_name "$NEW_TAG" \
-            --arg name "Release $NEW_TAG" \
-            --arg body "$RAW_NOTES_FROM_PREVIOUS_STEP" \
-            '{
-              tag_name: $tag_name,
-              name: $name,
-              body: $body,
-              draft: false,
-              prerelease: false
-            }')
-
-          echo "DEBUG: API Payload being sent (built by jq):"
-          echo "$API_JSON_PAYLOAD"
-
-          HTTP_RESPONSE_CODE=$(curl --silent --output /dev/stderr --write-out "%{http_code}" \
+          HTTP_STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" \
              --request POST \
              --url "https://api.github.com/repos/${{ github.repository }}/releases" \
              --header "Authorization: Bearer $GITHUB_TOKEN" \
@@ -125,11 +102,10 @@ jobs:
              --header "Content-Type: application/json" \
              --data "$API_JSON_PAYLOAD")
 
-          echo "DEBUG: GitHub API HTTP Response Code: $HTTP_RESPONSE_CODE"
-
-          if [ "$HTTP_RESPONSE_CODE" -ge 200 ] && [ "$HTTP_RESPONSE_CODE" -lt 300 ]; then
-            echo "✅ GitHub Release for $NEW_TAG created/updated successfully via API (HTTP $HTTP_RESPONSE_CODE)."
+          echo "GitHub API response code: $HTTP_STATUS"
+          if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
+            echo "✅ GitHub Release for $NEW_TAG created/updated successfully."
           else
-            echo "❌ Failed to create/update GitHub Release for $NEW_TAG via API (HTTP $HTTP_RESPONSE_CODE). Check previous error output from curl." >&2 # Send to stderr
+            echo "❌ Failed to create/update GitHub Release for $NEW_TAG. HTTP $HTTP_STATUS"
             exit 1
-          fi 
+          fi
