@@ -28,7 +28,7 @@ EVENT_SYSTEM_GUIDE = """
    - 格式: [event_end:事件ID]
 """
 
-def process_conversation(chat_id, user_input, chat_type="private", user_id=None):
+def process_conversation(chat_id, user_input, chat_type="private"):
     """
     根据对话历史和当前用户输入构建上下文，调用 AI 接口并返回回复内容。
 
@@ -36,7 +36,6 @@ def process_conversation(chat_id, user_input, chat_type="private", user_id=None)
       chat_id: 私聊时为用户 QQ，群聊时为群号
       user_input: 用户输入的文本（群聊时，已去除 "#" 前缀）
       chat_type: "private" 或 "group"
-      user_id: 发送消息的用户 QQ 号 (用于事件管理器)
 
     流程：
       1. 加载完整对话历史
@@ -45,7 +44,7 @@ def process_conversation(chat_id, user_input, chat_type="private", user_id=None)
       4. 调用 AI 接口获取回复，使用 yield 流式返回回复分段
       5. 将 AI 的完整回复加入到对话历史中，并保存
     """
-    print(f"[DEBUG] 开始处理对话 - chat_id: {chat_id}, chat_type: {chat_type}, user_id: {user_id}")
+    print(f"[DEBUG] 开始处理对话 - chat_id: {chat_id}, chat_type: {chat_type}")
 
     try:
         # 获取当前激活的角色
@@ -69,17 +68,14 @@ def process_conversation(chat_id, user_input, chat_type="private", user_id=None)
 
         # 检查并注入当前活动事件的特定信息
         active_event_specific_prompt = ""
-        if user_id:
-            active_event = event_manager.get_active_event(chat_id, chat_type, user_id)
-            if active_event and active_event.get("prompt_content"):
-                event_prompt_content = active_event["prompt_content"]
-                event_type = active_event.get("type", "未知类型")
-                event_id = active_event.get("id", "未知ID")
-                print(f"[DEBUG] 检测到活动事件，注入事件特定信息: ID {event_id}, Type {event_type}")
-                active_event_specific_prompt = f"\n\n--- 当前活动事件 ---\n事件类型: {event_type}\n事件ID: {event_id} \n\n事件规则和描述:\n{event_prompt_content}\n\n提醒: 你可以在适当的时候通过生成 \"[event_end:{event_id}]\" 标记来结束此事件。（用户看不到）\n"
-                system_prompt_content += active_event_specific_prompt # 将特定事件信息附加到总的system_prompt
-        else:
-            print("[WARNING] process_conversation 函数未接收到 user_id，无法检查活动事件的特定信息。")
+        active_event = event_manager.get_active_event(chat_id, chat_type, None)
+        if active_event and active_event.get("prompt_content"):
+            event_prompt_content = active_event["prompt_content"]
+            event_type = active_event.get("type", "未知类型")
+            event_id = active_event.get("id", "未知ID")
+            print(f"[DEBUG] 检测到活动事件，注入事件特定信息: ID {event_id}, Type {event_type}")
+            active_event_specific_prompt = f"\n\n--- 当前活动事件 ---\n事件类型: {event_type}\n事件ID: {event_id} \n\n事件规则和描述:\n{event_prompt_content}\n\n提醒: 你可以在适当的时候通过生成 \"[event_end:{event_id}]\" 标记来结束此事件。（用户看不到）\n"
+            system_prompt_content += active_event_specific_prompt # 将特定事件信息附加到总的system_prompt
 
         system_message = {"role": "system", "content": system_prompt_content}
 
