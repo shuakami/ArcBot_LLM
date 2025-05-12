@@ -54,32 +54,40 @@ jobs:
         run: |
           LATEST_TAG="${{ steps.get_version.outputs.latest_tag }}"
           NEW_TAG="${{ steps.calc_version.outputs.new_tag }}"
-          echo "Generating release notes between $LATEST_TAG and $NEW_TAG (using <br> for newlines)"
+          echo "Generating release notes between $LATEST_TAG and $NEW_TAG (using <br>, no markdown syntax)"
           
           COMMIT_LOG=""
-          RAW_MARKDOWN_NOTES=""
+          RAW_TEXT_NOTES=""
           BR_TAG="<br>"
           P_BREAK="<br><br>"
 
+          # Git log format: just the subject, hash, author, followed by <br>
+          # No preceding '*' or other markdown
+          GIT_LOG_FORMAT="%s (%h) by @%an$BR_TAG"
+
           if [ "$LATEST_TAG" == "v0.0.0" ]; then
-            COMMIT_LOG=$(git log --pretty=format:"* %s (%h) by @%an$BR_TAG" HEAD)
-            RAW_MARKDOWN_NOTES="## Release $NEW_TAG 🎉$P_BREAK_TAG_PART_This is the first automated release!$P_BREAK_TAG_PART_### Changes$BR_TAG$COMMIT_LOG$BR_TAG_PART_Thanks to all contributors!"
+            COMMIT_LOG=$(git log --pretty=format:"$GIT_LOG_FORMAT" HEAD)
+            RAW_TEXT_NOTES="Release $NEW_TAG 🎉 $P_BREAK_TAG_PART_This is the first automated release!$P_BREAK_TAG_PART_Changes$P_BREAK_TAG_PART_$COMMIT_LOG$P_BREAK_TAG_PART_Thanks to all contributors!"
           else
-            COMMIT_LOG=$(git log --pretty=format:"* %s (%h) by @%an$BR_TAG" $LATEST_TAG..HEAD)
-            RAW_MARKDOWN_NOTES="## Release $NEW_TAG 🎉$P_BREAK_TAG_PART_This release includes the following changes since $LATEST_TAG:$P_BREAK_TAG_PART_### Changes$BR_TAG$COMMIT_LOG$BR_TAG_PART_Thanks to all contributors!"
+            COMMIT_LOG=$(git log --pretty=format:"$GIT_LOG_FORMAT" $LATEST_TAG..HEAD)
+            # If no commits, COMMIT_LOG will be empty. Add a placeholder if you want.
+            if [ -z "$COMMIT_LOG" ]; then
+              COMMIT_LOG="No specific changes listed.$BR_TAG"
+            fi
+            RAW_TEXT_NOTES="Release $NEW_TAG 🎉 $P_BREAK_TAG_PART_This release includes the following changes since $LATEST_TAG:$P_BREAK_TAG_PART_Changes$P_BREAK_TAG_PART_$COMMIT_LOG$P_BREAK_TAG_PART_Thanks to all contributors!"
           fi
           
           # Replace placeholders for paragraph breaks to avoid issues with shell interpretation of P_BREAK in one go
-          RAW_MARKDOWN_NOTES=${RAW_MARKDOWN_NOTES//\$P_BREAK_TAG_PART_/$P_BREAK}
-          RAW_MARKDOWN_NOTES=${RAW_MARKDOWN_NOTES//\$BR_TAG_PART_/$BR_TAG}
+          RAW_TEXT_NOTES=${RAW_TEXT_NOTES//\$P_BREAK_TAG_PART_/$P_BREAK}
+          # Note: BR_TAG is already embedded in COMMIT_LOG items, no need for BR_TAG_PART_ replacement in the main structure if not used elsewhere.
 
-          ENCODED_FOR_GITHUB_OUTPUT="${RAW_MARKDOWN_NOTES//'%'/'%25'}"
-          ENCODED_FOR_GITHUB_OUTPUT="${ENCODED_FOR_GITHUB_OUTPUT//$'\n'/'%0A'}" # Actual newlines in RAW_MARKDOWN_NOTES (if any from commands) still need encoding for GITHUB_OUTPUT
+          ENCODED_FOR_GITHUB_OUTPUT="${RAW_TEXT_NOTES//'%'/'%25'}"
+          ENCODED_FOR_GITHUB_OUTPUT="${ENCODED_FOR_GITHUB_OUTPUT//$'\n'/'%0A'}" # Actual newlines (if any from commands) still need encoding
           ENCODED_FOR_GITHUB_OUTPUT="${ENCODED_FOR_GITHUB_OUTPUT//$'\r'/'%0D'}"
           echo "generated_release_notes=$ENCODED_FOR_GITHUB_OUTPUT" >> "$GITHUB_OUTPUT"
           
-          echo "Raw markdown notes with <br> generated (will be passed to Python script):"
-          echo "$RAW_MARKDOWN_NOTES"
+          echo "Raw text notes with <br> generated (will be passed to Python script):"
+          echo "$RAW_TEXT_NOTES"
 
       - name: Create GitHub Release using Python
         env:
