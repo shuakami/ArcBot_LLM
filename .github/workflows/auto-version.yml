@@ -97,14 +97,11 @@ jobs:
           NEW_TAG="${{ steps.calc_version.outputs.new_tag }}"
           RELEASE_NOTES_CONTENT="${{ steps.generate_release_notes.outputs.release_notes_content }}"
           
-          echo "Creating release with notes:"
-          # For debugging, print the notes as gh will receive them (after unescaping by the shell)
-          # printf "Release notes for gh command (unescaped by shell):\\n%s\\n" "$RELEASE_NOTES_CONTENT"
+          echo "Creating release with notes (piping to gh stdin):"
+          # No longer creating an intermediate file
+          # printf "%s" "$RELEASE_NOTES_CONTENT" > release_notes.md 
           
-          # Using a file to pass notes to gh release create is more robust for complex notes
-          printf "%s" "$RELEASE_NOTES_CONTENT" > release_notes.md
-          
-          gh release create "$NEW_TAG" \\
-            --title "Release $NEW_TAG" \\
-            --notes-file release_notes.md
+          printf "%s" "$RELEASE_NOTES_CONTENT" | gh release create "$NEW_TAG" \
+            --title "Release $NEW_TAG" \
+            --notes - # Read notes from stdin
           echo "Created GitHub release for $NEW_TAG" 
