@@ -95,21 +95,21 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           NEW_TAG="${{ steps.calc_version.outputs.new_tag }}"
-          # This will be the raw markdown with actual newlines, as decoded by Actions from the previous step's output
           RAW_NOTES_FROM_PREVIOUS_STEP="${{ steps.generate_release_notes.outputs.release_notes_for_step_output }}"
 
-          # Create a JSON-safe string for the 'body' field. jq -Rsa . wraps the input in quotes and escapes internal chars.
-          # Then sed removes the outer quotes because we'll add them in the payload string.
-          JSON_ESCAPED_NOTES_BODY=$(printf "%s" "$RAW_NOTES_FROM_PREVIOUS_STEP" | jq -Rsa . | sed 's/^"//;s/"$//')
+          # Escape characters that would break the JSON string structure for the 'body' field.
+          # 1. Escape backslashes
+          # 2. Escape double quotes
+          # Newlines (\n) are fine as they are, they will be correctly represented in the JSON string.
+          NOTES_FOR_JSON_BODY="${RAW_NOTES_FROM_PREVIOUS_STEP//'\'/'\\\'}" # \ -> \\
+          NOTES_FOR_JSON_BODY="${NOTES_FOR_JSON_BODY//'"'/'\"'}"      # " -> \"
 
           echo "Creating release $NEW_TAG via GitHub API"
           
-          # Construct the JSON payload string
-          # Note the careful quoting for the body
           API_JSON_PAYLOAD=$(printf '{ "tag_name": "%s", "name": "Release %s", "body": "%s", "draft": false, "prerelease": false }' \
             "$NEW_TAG" \
             "$NEW_TAG" \
-            "$JSON_ESCAPED_NOTES_BODY")
+            "$NOTES_FOR_JSON_BODY")
 
           echo "DEBUG: API Payload being sent:"
           echo "$API_JSON_PAYLOAD"
