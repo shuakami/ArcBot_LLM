@@ -3,8 +3,12 @@ from napcat.post import init_ws
 from utils.group_activity import group_activity_manager
 from llm import process_conversation
 import time
+import updater
 
 def main():
+    # 首先检查更新
+    updater.check_and_update()
+
     # 初始化消息记录数据库
     print("🚀 初始化数据库...")
     init_db()

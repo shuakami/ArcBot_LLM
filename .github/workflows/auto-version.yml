@@ -1,0 +1,110 @@
+name: Bump Version and Create Release
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  bump_version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 获取所有历史记录，以便访问所有标签
+
+      - name: Get latest version tag
+        id: get_version
+        run: |
+          # 从远程获取所有标签，以防本地不是最新的
+          git fetch --tags --force
+          
+          # 获取最新的符合 SemVer (vX.Y.Z) 格式的标签
+          # 如果没有找到，默认为 v0.0.0，这样第一次运行时会生成 v0.0.1
+          LATEST_TAG=$(git tag -l "v[0-9]*.[0-9]*.[0-9]*" | sort -V | tail -n 1)
+          if [ -z "$LATEST_TAG" ]; then
+            LATEST_TAG="v0.0.0"
+          fi
+          echo "Latest tag is: $LATEST_TAG"
+          # 将 latest_tag 设置为后续步骤的输出变量
+          echo "latest_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Calculate next version
+        id: calc_version
+        run: |
+          LATEST_TAG="${{ steps.get_version.outputs.latest_tag }}"
+          # 移除 'v' 前缀，例如 "v1.2.3" -> "1.2.3"
+          VERSION_CORE=${LATEST_TAG#v}
+          
+          # 将版本号分割为 MAJOR, MINOR, PATCH
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION_CORE"
+          
+          # 递增 PATCH 版本号
+          NEW_PATCH=$((PATCH + 1))
+          
+          NEW_TAG="v${MAJOR}.${MINOR}.${NEW_PATCH}"
+          echo "Calculated new tag: $NEW_TAG"
+          # 将 new_tag 设置为后续步骤的输出变量
+          echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push new tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NEW_TAG="${{ steps.calc_version.outputs.new_tag }}"
+          # 配置 git 用户信息，推送标签时可能需要
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git tag "$NEW_TAG"
+          git push origin "$NEW_TAG"
+          echo "Created and pushed tag $NEW_TAG"
+
+      - name: Generate Release Notes
+        id: generate_release_notes
+        run: |
+          LATEST_TAG="${{ steps.get_version.outputs.latest_tag }}"
+          NEW_TAG="${{ steps.calc_version.outputs.new_tag }}"
+          
+          echo "Generating release notes between $LATEST_TAG and $NEW_TAG"
+          
+          COMMIT_LOG=""
+          if [ "$LATEST_TAG" == "v0.0.0" ]; then
+            COMMIT_LOG=$(git log --pretty=format:"* %s (%h) by @%an" HEAD)
+            RELEASE_NOTES="## Release $NEW_TAG 🎉\n\nThis is the first automated release!\n\n### Changes\n$COMMIT_LOG\n\nThanks to all contributors!"
+          else
+            COMMIT_LOG=$(git log --pretty=format:"* %s (%h) by @%an" $LATEST_TAG..HEAD)
+            RELEASE_NOTES="## Release $NEW_TAG 🎉\n\nThis release includes the following changes since $LATEST_TAG:\n\n### Changes\n$COMMIT_LOG\n\nThanks to all contributors!"
+          fi
+          
+          # Escape special characters for GitHub Actions output
+          RELEASE_NOTES="${RELEASE_NOTES//'%'/'%25'}"
+          RELEASE_NOTES="${RELEASE_NOTES//$'\n'/'%0A'}"
+          RELEASE_NOTES="${RELEASE_NOTES//$'\r'/'%0D'}"
+          
+          echo "Generated Notes (escaped for GITHUB_OUTPUT):"
+          echo "$RELEASE_NOTES" 
+          
+          echo "release_notes_content=$RELEASE_NOTES" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NEW_TAG="${{ steps.calc_version.outputs.new_tag }}"
+          RELEASE_NOTES_CONTENT="${{ steps.generate_release_notes.outputs.release_notes_content }}"
+          
+          echo "Creating release with notes:"
+          # For debugging, print the notes as gh will receive them (after unescaping by the shell)
+          # printf "Release notes for gh command (unescaped by shell):\\n%s\\n" "$RELEASE_NOTES_CONTENT"
+          
+          # Using a file to pass notes to gh release create is more robust for complex notes
+          echo "$RELEASE_NOTES_CONTENT" > release_notes.md
+          
+          gh release create "$NEW_TAG" \\
+            --title "Release $NEW_TAG" \\
+            --notes-file release_notes.md
+          echo "Created GitHub release for $NEW_TAG" 
