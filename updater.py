@@ -169,7 +169,7 @@ def write_current_version(version_str):
     """将当前版本写入文件"""
     with open(VERSION_FILE, 'w') as f:
         f.write(str(version_str))
-    print(f"ℹ本地版本已更新为: {version_str}")
+    print(f"本地版本已更新为: {version_str}")
 
 def restart_program():
     """重启当前程序"""
