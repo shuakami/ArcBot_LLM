@@ -102,7 +102,7 @@ jobs:
           # printf "Release notes for gh command (unescaped by shell):\\n%s\\n" "$RELEASE_NOTES_CONTENT"
           
           # Using a file to pass notes to gh release create is more robust for complex notes
-          echo "$RELEASE_NOTES_CONTENT" > release_notes.md
+          printf "%s" "$RELEASE_NOTES_CONTENT" > release_notes.md
           
           gh release create "$NEW_TAG" \\
             --title "Release $NEW_TAG" \\
