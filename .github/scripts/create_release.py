@@ -5,14 +5,14 @@ import requests
 
 def main():
     new_tag = os.environ.get("INPUT_NEW_TAG")
-    notes = os.environ.get("INPUT_RELEASE_NOTES") 
+    notes_with_real_newlines = os.environ.get("INPUT_RELEASE_NOTES") 
     github_token = os.environ.get("INPUT_GITHUB_TOKEN")
     github_repository = os.environ.get("INPUT_GITHUB_REPOSITORY") 
 
-    if not all([new_tag, notes, github_token, github_repository]):
+    if not all([new_tag, notes_with_real_newlines, github_token, github_repository]):
         print("Error: Missing one or more required environment variables.")
         print(f"NEW_TAG: {new_tag is not None}")
-        print(f"RELEASE_NOTES: {notes is not None}")
+        print(f"RELEASE_NOTES: {notes_with_real_newlines is not None}")
         print(f"GITHUB_TOKEN: {github_token is not None}")
         print(f"GITHUB_REPOSITORY: {github_repository is not None}")
         sys.exit(1)
@@ -22,25 +22,26 @@ def main():
     headers = {
         "Authorization": f"Bearer {github_token}",
         "Accept": "application/vnd.github.v3+json",
-        "Content-Type": "application/json",
+        "Content-Type": "application/json", 
     }
 
-    payload = {
-        "tag_name": new_tag,
-        "name": f"Release {new_tag}",
-        "body": notes, 
-        "draft": False,
-        "prerelease": False,
-    }
+    escaped_notes_for_json_value = notes_with_real_newlines.replace('\\', '\\\\').replace('"', '\\"')
+    
+
+    manual_payload_str = f'''{{
+        "tag_name": "{new_tag}",
+        "name": "Release {new_tag}",
+        "body": "{escaped_notes_for_json_value}",
+        "draft": false,
+        "prerelease": false
+    }}'''
 
     print(f"Creating release {new_tag} for repository {github_repository} via API...")
     print(f"API URL: {api_url}")
-    print(f"""Payload being sent (notes might be long):
-{json.dumps(payload, indent=2)}
-""")
+    print(f"Manually constructed Payload string being sent (notes might be long):\n{manual_payload_str}\n")
 
     try:
-        response = requests.post(api_url, headers=headers, json=payload, timeout=30)
+        response = requests.post(api_url, headers=headers, data=manual_payload_str.encode('utf-8'), timeout=30)
         response.raise_for_status() 
         
         response_data = response.json()
