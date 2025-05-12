@@ -97,21 +97,24 @@ jobs:
           NEW_TAG="${{ steps.calc_version.outputs.new_tag }}"
           RAW_NOTES_FROM_PREVIOUS_STEP="${{ steps.generate_release_notes.outputs.release_notes_for_step_output }}"
 
-          # Escape characters that would break the JSON string structure for the 'body' field.
-          # 1. Escape backslashes
-          # 2. Escape double quotes
-          # Newlines (\n) are fine as they are, they will be correctly represented in the JSON string.
-          NOTES_FOR_JSON_BODY="${RAW_NOTES_FROM_PREVIOUS_STEP//'\'/'\\\'}" # \ -> \\
-          NOTES_FOR_JSON_BODY="${NOTES_FOR_JSON_BODY//'"'/'\"'}"      # " -> \"
-
           echo "Creating release $NEW_TAG via GitHub API"
           
-          API_JSON_PAYLOAD=$(printf '{ "tag_name": "%s", "name": "Release %s", "body": "%s", "draft": false, "prerelease": false }' \
-            "$NEW_TAG" \
-            "$NEW_TAG" \
-            "$NOTES_FOR_JSON_BODY")
+          # 使用 jq 构建整个 JSON payload
+          # --arg会将shell变量作为JSON字符串传递给jq查询
+          # -n 表示不读取任何输入，而是从参数构建JSON
+          API_JSON_PAYLOAD=$(jq -n \
+            --arg tag_name "$NEW_TAG" \
+            --arg name "Release $NEW_TAG" \
+            --arg body "$RAW_NOTES_FROM_PREVIOUS_STEP" \
+            '{
+              tag_name: $tag_name,
+              name: $name,
+              body: $body,
+              draft: false,
+              prerelease: false
+            }')
 
-          echo "DEBUG: API Payload being sent:"
+          echo "DEBUG: API Payload being sent (built by jq):"
           echo "$API_JSON_PAYLOAD"
 
           HTTP_RESPONSE_CODE=$(curl --silent --output /dev/stderr --write-out "%{http_code}" \
