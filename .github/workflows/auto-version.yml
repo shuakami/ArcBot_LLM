@@ -72,36 +72,61 @@ jobs:
           echo "Generating release notes between $LATEST_TAG and $NEW_TAG"
           
           COMMIT_LOG=""
+          RAW_MARKDOWN_NOTES=""
           if [ "$LATEST_TAG" == "v0.0.0" ]; then
             COMMIT_LOG=$(git log --pretty=format:"* %s (%h) by @%an" HEAD)
-            RELEASE_NOTES="## Release $NEW_TAG 🎉\n\nThis is the first automated release!\n\n### Changes\n$COMMIT_LOG\n\nThanks to all contributors!"
+            RAW_MARKDOWN_NOTES="## Release $NEW_TAG 🎉\n\nThis is the first automated release!\n\n### Changes\n$COMMIT_LOG\n\nThanks to all contributors!"
           else
             COMMIT_LOG=$(git log --pretty=format:"* %s (%h) by @%an" $LATEST_TAG..HEAD)
-            RELEASE_NOTES="## Release $NEW_TAG 🎉\n\nThis release includes the following changes since $LATEST_TAG:\n\n### Changes\n$COMMIT_LOG\n\nThanks to all contributors!"
+            RAW_MARKDOWN_NOTES="## Release $NEW_TAG 🎉\n\nThis release includes the following changes since $LATEST_TAG:\n\n### Changes\n$COMMIT_LOG\n\nThanks to all contributors!"
           fi
           
-          # Escape special characters for GitHub Actions output
-          RELEASE_NOTES="${RELEASE_NOTES//'%'/'%25'}"
-          RELEASE_NOTES="${RELEASE_NOTES//$'\n'/'%0A'}"
-          RELEASE_NOTES="${RELEASE_NOTES//$'\r'/'%0D'}"
+          # For GITHUB_OUTPUT, encode newlines etc. so Actions can pass it to the next step correctly
+          ENCODED_FOR_GITHUB_OUTPUT="${RAW_MARKDOWN_NOTES//'%'/'%25'}"
+          ENCODED_FOR_GITHUB_OUTPUT="${ENCODED_FOR_GITHUB_OUTPUT//$'\n'/'%0A'}"
+          ENCODED_FOR_GITHUB_OUTPUT="${ENCODED_FOR_GITHUB_OUTPUT//$'\r'/'%0D'}"
+          echo "release_notes_for_step_output=$ENCODED_FOR_GITHUB_OUTPUT" >> "$GITHUB_OUTPUT"
           
-          echo "Generated Notes (escaped for GITHUB_OUTPUT):"
-          echo "$RELEASE_NOTES" 
-          
-          echo "release_notes_content=$RELEASE_NOTES" >> "$GITHUB_OUTPUT"
+          echo "Raw markdown notes generated:"
+          echo "$RAW_MARKDOWN_NOTES"
 
-      - name: Create GitHub Release
+      - name: Create GitHub Release via API
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           NEW_TAG="${{ steps.calc_version.outputs.new_tag }}"
-          RELEASE_NOTES_CONTENT="${{ steps.generate_release_notes.outputs.release_notes_content }}"
+          # This will be the raw markdown with actual newlines, as decoded by Actions from the previous step's output
+          RAW_NOTES_FROM_PREVIOUS_STEP="${{ steps.generate_release_notes.outputs.release_notes_for_step_output }}"
+
+          # Create a JSON-safe string for the 'body' field. jq -Rsa . wraps the input in quotes and escapes internal chars.
+          # Then sed removes the outer quotes because we'll add them in the payload string.
+          JSON_ESCAPED_NOTES_BODY=$(printf "%s" "$RAW_NOTES_FROM_PREVIOUS_STEP" | jq -Rsa . | sed 's/^"//;s/"$//')
+
+          echo "Creating release $NEW_TAG via GitHub API"
           
-          echo "Creating release with notes (piping to gh stdin):"
-          # No longer creating an intermediate file
-          # printf "%s" "$RELEASE_NOTES_CONTENT" > release_notes.md 
-          
-          printf "%s" "$RELEASE_NOTES_CONTENT" | gh release create "$NEW_TAG" \
-            --title "Release $NEW_TAG" \
-            --notes - # Read notes from stdin
-          echo "Created GitHub release for $NEW_TAG" 
+          # Construct the JSON payload string
+          # Note the careful quoting for the body
+          API_JSON_PAYLOAD=$(printf '{ "tag_name": "%s", "name": "Release %s", "body": "%s", "draft": false, "prerelease": false }' \
+            "$NEW_TAG" \
+            "$NEW_TAG" \
+            "$JSON_ESCAPED_NOTES_BODY")
+
+          echo "DEBUG: API Payload being sent:"
+          echo "$API_JSON_PAYLOAD"
+
+          HTTP_RESPONSE_CODE=$(curl --silent --output /dev/stderr --write-out "%{http_code}" \
+             --request POST \
+             --url "https://api.github.com/repos/${{ github.repository }}/releases" \
+             --header "Authorization: Bearer $GITHUB_TOKEN" \
+             --header "Accept: application/vnd.github.v3+json" \
+             --header "Content-Type: application/json" \
+             --data "$API_JSON_PAYLOAD")
+
+          echo "DEBUG: GitHub API HTTP Response Code: $HTTP_RESPONSE_CODE"
+
+          if [ "$HTTP_RESPONSE_CODE" -ge 200 ] && [ "$HTTP_RESPONSE_CODE" -lt 300 ]; then
+            echo "✅ GitHub Release for $NEW_TAG created/updated successfully via API (HTTP $HTTP_RESPONSE_CODE)."
+          else
+            echo "❌ Failed to create/update GitHub Release for $NEW_TAG via API (HTTP $HTTP_RESPONSE_CODE). Check previous error output from curl." >&2 # Send to stderr
+            exit 1
+          fi 
