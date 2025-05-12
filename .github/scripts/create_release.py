@@ -35,9 +35,9 @@ def main():
 
     print(f"Creating release {new_tag} for repository {github_repository} via API...")
     print(f"API URL: {api_url}")
-    print(f"Payload being sent (notes might be long):
+    print(f"""Payload being sent (notes might be long):
 {json.dumps(payload, indent=2)}
-")
+""")
 
     try:
         response = requests.post(api_url, headers=headers, json=payload, timeout=30)
