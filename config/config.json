@@ -1,0 +1,25 @@
+{
+  "debug": false,
+  "qqbot": {
+    "ws_url": "ws://ip:port/",
+    "token": "xxx",
+    "admin_qq": [
+      "1680839", "10001"
+    ],
+    "qq_list_mode": "black",
+    "group_list_mode": "black",
+    "group_prefix": "#"
+    },
+  "ai": {
+    "api_url": "https://api.deepseek.com/chat/completions",
+    "token": "sk-xxx",
+    "model": "deepseek-chat",
+    "max_context_tokens": 15000
+  },
+  "image_ai": {
+    "api_url": "https://api.deepseek.com/v1/chat/completions",
+    "token": "sk-xxx",
+    "model": "deepseek-chat",
+    "max_context_tokens": 15000
+  }
+}
