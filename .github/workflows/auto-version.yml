@@ -27,7 +27,6 @@ jobs:
           if [ -z "$LATEST_TAG" ]; then
             LATEST_TAG="v0.0.0"
           fi
-          echo "Latest tag is: $LATEST_TAG"
           echo "latest_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Calculate next version
@@ -38,7 +37,6 @@ jobs:
           IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION_CORE"
           NEW_PATCH=$((PATCH + 1))
           NEW_TAG="v${MAJOR}.${MINOR}.${NEW_PATCH}"
-          echo "Calculated new tag: $NEW_TAG"
           echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Create and push new tag
@@ -46,10 +44,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           NEW_TAG="${{ steps.calc_version.outputs.new_tag }}"
-          # Configure git for the GitHub Actions bot
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
           git tag "$NEW_TAG"
           git push origin "$NEW_TAG"
           echo "Created and pushed tag $NEW_TAG"
@@ -61,7 +57,6 @@ jobs:
           NEW_TAG="${{ steps.calc_version.outputs.new_tag }}"
           
           if [ "$LATEST_TAG" = "v0.0.0" ]; then
-            # First automated release – include complete history
             COMMIT_LOG=$(git log --pretty=format:"* %s (%h) by @%an" HEAD)
             RAW_MARKDOWN_NOTES="## Release $NEW_TAG 🎉\n\nThis is the first automated release!\n\n### Changes\n$COMMIT_LOG\n\nThanks to all contributors!"
           else
@@ -69,21 +64,20 @@ jobs:
             RAW_MARKDOWN_NOTES="## Release $NEW_TAG 🎉\n\nThis release includes the following changes since $LATEST_TAG:\n\n### Changes\n$COMMIT_LOG\n\nThanks to all contributors!"
           fi
           
-          # Encode newlines for safe step outputs
-          ENCODED_FOR_GITHUB_OUTPUT="${RAW_MARKDOWN_NOTES//'%'/'%25'}"
-          ENCODED_FOR_GITHUB_OUTPUT="${ENCODED_FOR_GITHUB_OUTPUT//$'\n'/'%0A'}"
-          ENCODED_FOR_GITHUB_OUTPUT="${ENCODED_FOR_GITHUB_OUTPUT//$'\r'/'%0D'}"
-          echo "release_notes=$ENCODED_FOR_GITHUB_OUTPUT" >> "$GITHUB_OUTPUT"
+          # Pass multi‑line output without manual % encoding
+          {
+            echo 'release_notes<<EOF'
+            echo "$RAW_MARKDOWN_NOTES"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release via API
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           NEW_TAG="${{ steps.calc_version.outputs.new_tag }}"
-          # GitHub automatically decodes the %0A back to real newlines when the output is read
           RAW_NOTES="${{ steps.generate_release_notes.outputs.release_notes }}"
           
-          # Build JSON payload safely with jq to avoid manual escaping
           API_JSON_PAYLOAD=$(jq -n --arg tag_name "$NEW_TAG" \
                                    --arg name "Release $NEW_TAG" \
                                    --arg body "$RAW_NOTES" \
@@ -92,7 +86,7 @@ jobs:
                                       body: $body,
                                       draft: false,
                                       prerelease: false }')
-
+          
           echo "Creating release $NEW_TAG via GitHub API"
           HTTP_STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" \
              --request POST \
@@ -101,7 +95,7 @@ jobs:
              --header "Accept: application/vnd.github.v3+json" \
              --header "Content-Type: application/json" \
              --data "$API_JSON_PAYLOAD")
-
+          
           echo "GitHub API response code: $HTTP_STATUS"
           if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
             echo "✅ GitHub Release for $NEW_TAG created/updated successfully."
