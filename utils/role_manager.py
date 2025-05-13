@@ -8,6 +8,9 @@ import string
 # 激活角色状态存储
 # key: (chat_id: str, chat_type: str), value: role_name: str (None for default)
 active_roles: Dict[tuple[str, str], Optional[str]] = {}
+# 角色切换指示器
+# key: (chat_id: str, chat_type: str), value: bool (True if role was just switched)
+role_switch_flags: Dict[tuple[str, str], bool] = {}
 
 # 文件路径
 ROLES_FILE = os.path.join("data", "roles.json")
@@ -102,23 +105,42 @@ def get_role_names() -> List[str]:
     return list(roles.keys())
 
 def set_active_role(chat_id: str, chat_type: str, role_name: Optional[str]):
-    """设置当前聊天的激活角色"""
+    """设置当前聊天的激活角色，并在角色实际更改时设置切换标志。"""
     state_key = (chat_id, chat_type)
-    if role_name is None:
-        if state_key in active_roles:
+    old_role = active_roles.get(state_key) # 获取旧角色
+
+    normalized_new_role_name = role_name.strip() if role_name else None
+
+    # 处理切换回默认角色的情况
+    if normalized_new_role_name is None:
+        if state_key in active_roles: # 之前有特定角色
             del active_roles[state_key]
             print(f"[INFO] Chat ({chat_id}, {chat_type}) 已切换回默认角色。")
+            if old_role is not None: # 确保是从一个非默认角色切换到默认
+                 role_switch_flags[state_key] = True
+                 print(f"[DEBUG] Role switch flag set for {state_key} (to default)")
         else:
-            print(f"[INFO] Chat ({chat_id}, {chat_type}) 当前已是默认角色。")
+            # 本来就是默认，无需操作也无需设置 flag
+            print(f"[INFO] Chat ({chat_id}, {chat_type}) 当前已是默认角色，无需切换。")
+        return True # 切换到默认总是"成功"的
+
+    # 处理切换到特定角色的情况
+    roles = load_roles()
+    if normalized_new_role_name not in roles:
+        print(f"[ERROR] 尝试设置的角色 '{normalized_new_role_name}' 不存在。")
+        return False # 指示设置失败
+
+    # 如果新角色与旧角色不同，或者之前是默认角色，则更新并设置flag
+    if old_role != normalized_new_role_name:
+        active_roles[state_key] = normalized_new_role_name
+        role_switch_flags[state_key] = True
+        print(f"[INFO] Chat ({chat_id}, {chat_type}) 已切换到角色: {normalized_new_role_name}")
+        print(f"[DEBUG] Role switch flag set for {state_key} (to {normalized_new_role_name})")
     else:
-        roles = load_roles()
-        normalized_name = role_name.strip()
-        if normalized_name not in roles:
-            print(f"[ERROR] 尝试设置的角色 '{normalized_name}' 不存在。")
-            return False # 指示设置失败
-        active_roles[state_key] = normalized_name
-        print(f"[INFO] Chat ({chat_id}, {chat_type}) 已切换到角色: {normalized_name}")
-        return True # 指示设置成功
+        # 新旧角色相同，无需操作也无需设置 flag
+        print(f"[INFO] Chat ({chat_id}, {chat_type}) 当前已是角色 '{normalized_new_role_name}'，无需切换。")
+    
+    return True # 指示设置成功
 
 def get_active_role(chat_id: str, chat_type: str) -> Optional[str]:
     """获取当前聊天的激活角色名称"""
@@ -233,6 +255,15 @@ def reject_pending_role(pending_id: str) -> Tuple[bool, Optional[Dict]]:
 def list_pending_roles() -> Dict[str, Dict]:
     """列出所有待审核的角色"""
     return _load_pending_roles()
+
+# 新增函数
+def check_and_clear_role_switch_flag(chat_id: str, chat_type: str) -> bool:
+    """检查指定聊天的角色切换标志，如果为True则返回True并清除该标志。"""
+    state_key = (chat_id, chat_type)
+    switched = role_switch_flags.pop(state_key, False)
+    if switched:
+        print(f"[DEBUG] Consumed role switch flag for {state_key}")
+    return switched
 
 # 初始化时确保文件存在
 _ensure_file(ROLES_FILE)

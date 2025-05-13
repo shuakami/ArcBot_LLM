@@ -11,30 +11,47 @@ os.makedirs(PRIVATE_DIR, exist_ok=True)
 os.makedirs(GROUP_DIR, exist_ok=True)
 
 def get_latest_system_content(chat_id: str, chat_type: str) -> str:
-    """获取最新的系统提示和对应角色的笔记内容"""
+    """获取最新的系统提示。优先使用激活角色的专属Prompt，若无则用通用Prompt，并结合对应角色的笔记内容和表情包提示。"""
+    base_system_prompt = ""
     try:
-        with open(os.path.join("config", "system_prompt.txt"), "r", encoding="utf-8") as sp:
-            system_prompt = sp.read().strip()
-        
-        # 获取当前激活的角色
-        active_role = role_manager.get_active_role(chat_id, chat_type)
-        role_key = active_role if active_role else DEFAULT_ROLE_KEY
-        print(f"[Debug] files.py: Getting notes context for role: {role_key}")
-        
-        # 获取对应角色的笔记内容
-        notes_context = notebook.get_notes_as_context(role=role_key)
+        # 1. 获取激活角色的专属 Prompt
+        active_role_name = role_manager.get_active_role(chat_id, chat_type)
+        role_specific_prompt = None
+        if active_role_name:
+            role_specific_prompt = role_manager.get_active_role_prompt(chat_id, chat_type)
+            print(f"[Debug] files.py: Active role '{active_role_name}' has specific prompt: {'Yes' if role_specific_prompt else 'No'}")
+
+        # 2. 如果角色专属 Prompt 存在且非空，则使用它作为基础
+        if role_specific_prompt:
+            base_system_prompt = role_specific_prompt.strip()
+        else:
+            # 否则，读取通用的 system_prompt.txt
+            try:
+                with open(os.path.join("config", "system_prompt.txt"), "r", encoding="utf-8") as sp:
+                    base_system_prompt = sp.read().strip()
+                print(f"[Debug] files.py: Using general system_prompt.txt as base.")
+            except Exception as e_sp:
+                print(f"读取通用 system_prompt.txt 失败: {e_sp}")
+                # 即使通用prompt读取失败，也继续尝试加载笔记等
+
+        # 3. 获取并追加对应角色的笔记内容
+        # role_key 用于笔记，如果激活了角色就用角色名，否则用默认key
+        role_key_for_notes = active_role_name if active_role_name else DEFAULT_ROLE_KEY
+        print(f"[Debug] files.py: Getting notes context for role_key: {role_key_for_notes}")
+        notes_context = notebook.get_notes_as_context(role=role_key_for_notes)
         if notes_context:
-            system_prompt = f"{system_prompt}\n\n{notes_context}"
+            base_system_prompt = f"{base_system_prompt}\n\n{notes_context}"
             
-        # 添加表情包提示
+        # 4. 添加表情包提示
         emoji_prompt = emoji_storage.get_emoji_system_prompt()
         if emoji_prompt:
-            system_prompt = f"{system_prompt}{emoji_prompt}"
+            base_system_prompt = f"{base_system_prompt}{emoji_prompt}"
             
-        return system_prompt
+        return base_system_prompt.strip() #确保最后返回的内容也去除首尾空白
+        
     except Exception as e:
-        print(f"读取系统提示或笔记失败 (chat_id={chat_id}, chat_type={chat_type}): {e}")
-        return ""
+        print(f"生成最终 system_content 失败 (chat_id={chat_id}, chat_type={chat_type}): {e}")
+        return "" # 发生严重错误时返回空字符串，避免注入错误内容
 
 def get_history_file(id_str: str, chat_type="private") -> str:
     """根据聊天ID、类型和当前激活的角色获取历史文件路径"""

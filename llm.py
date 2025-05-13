@@ -79,16 +79,23 @@ def process_conversation(chat_id, user_input, chat_type="private"):
 
         system_message = {"role": "system", "content": system_prompt_content}
 
-        full_history = load_conversation_history(chat_id, chat_type)
-        print(f"[DEBUG] 已加载对话历史，共 {len(full_history)} 条记录")
+        role_was_just_switched = role_manager.check_and_clear_role_switch_flag(chat_id, chat_type)
 
-        if not isinstance(full_history, list) or not full_history:
-             print("[Warning] 加载的历史记录不是有效列表或为空，将创建新的历史记录。")
-             full_history = [system_message]
-        elif full_history[0].get("role") != "system":
-            full_history.insert(0, system_message)
+        if role_was_just_switched:
+            # 角色刚刚切换，强制使用干净历史
+            full_history = [system_message]
+            print(f"[DEBUG] Role was just switched. Starting with clean history for role '{role_key_for_context}'.")
         else:
-            full_history[0]["content"] = system_prompt_content
+            # 角色未切换（或切换信号已处理），加载现有历史
+            full_history = load_conversation_history(chat_id, chat_type)
+            print(f"[DEBUG] Role not switched or flag already cleared. Loading history for role '{role_key_for_context}'. Total {len(full_history)} messages loaded.")
+            # load_conversation_history 内部已确保 system prompt 是最新的
+            if not isinstance(full_history, list) or not full_history:
+                 print("[Warning] load_conversation_history returned invalid or empty list. Initializing with system message.")
+                 full_history = [system_message]
+            elif full_history[0].get("role") != "system": # 再次确保第一条是system
+                print("[Warning] Loaded history does not start with system message. Inserting system message.")
+                full_history.insert(0, system_message)
 
         user_message_with_role = {"role": "user", "content": user_input, "role_marker": role_key_for_context}
         if isinstance(full_history, list):

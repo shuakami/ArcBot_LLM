@@ -23,8 +23,9 @@ def get_ai_response(conversation):
         "stream": True
     }
     
-    print(f"[DEBUG] 发送请求到 {CONFIG['ai']['api_url']}")
-    response = requests.post(CONFIG["ai"]["api_url"], headers=headers, json=payload, stream=True)
+    api_url = CONFIG["ai"]["api_url"]
+    print(f"[DEBUG] 发送请求到 {api_url}")
+    response = requests.post(api_url, headers=headers, json=payload, stream=True)
     
     if response.status_code != 200:
         error_msg = f"AI接口调用失败, 状态码：{response.status_code}, {response.text}"
