@@ -18,7 +18,7 @@ def build_context_within_limit(full_history, active_role: str = DEFAULT_ROLE_KEY
     # 分离系统提示和对话历史记录
     system_prompt = None
     dialog_history = []
-    # 检查 full_history 是否非空，且第一项是包含 'role' 键的字典
+    # 检查 full_history 是否非空，且第一项是包含 'role' 键的字典 
     if full_history and isinstance(full_history[0], dict) and "role" in full_history[0] and full_history[0]["role"] == "system":
         system_prompt = full_history[0]
         dialog_history = full_history[1:]
