@@ -109,6 +109,11 @@ def process_conversation(chat_id, user_input, chat_type="private"):
         context_to_send = build_context_within_limit(full_history, active_role=role_key_for_context)
         print(f"[DEBUG] 已构建上下文，共 {len(context_to_send)} 条消息 (过滤角色: {role_key_for_context})")
 
+        if context_to_send and context_to_send[0].get('role') == 'system':
+            print(f"[DEBUG] Final System Prompt sent to AI:\n---\n{context_to_send[0]['content']}\n---")
+        else:
+            print("[DEBUG] Warning: context_to_send does not start with a system message or is empty.")
+
         response_segments = []
         full_response = ""
 
