@@ -4,6 +4,12 @@ from typing import Dict, List, Optional, Tuple, Any
 import time
 import random
 import string
+from logger import get_logger # Import the new logger
+
+logger = get_logger(__name__) # Get a logger for this module
+
+# 常量定义
+MAX_ROLE_PROMPT_LENGTH = 2000
 
 # 激活角色状态存储
 # key: (chat_id: str, chat_type: str), value: role_name: str (None for default)
@@ -23,28 +29,42 @@ def _ensure_file(file_path: str, default_content: Any = {}):
         try:
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(default_content, f, ensure_ascii=False, indent=2)
-        except IOError as e:
-            print(f"[ERROR] 创建文件失败: {file_path}, Error: {e}")
+        except IOError as e_io: # More specific exception
+            logger.error(f"创建文件失败: {file_path}, Error: {e_io}", exc_info=True)
 
 def _load_json(file_path: str, default_return: Any = {}) -> Any:
     """加载 JSON 文件，处理异常"""
-    _ensure_file(file_path, default_return)
+    _ensure_file(file_path, default_return) # _ensure_file now uses logging
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-            return data if isinstance(data, type(default_return)) else default_return
-    except (json.JSONDecodeError, IOError) as e:
-        print(f"[ERROR] 加载 JSON 文件失败: {file_path}, Error: {e}")
+            # Basic type check against default_return to ensure some consistency
+            if not isinstance(data, type(default_return)):
+                logger.warning(f"Data in {file_path} is not of expected type {type(default_return)}. Returning default.")
+                return default_return
+            return data
+    except json.JSONDecodeError as e_json:
+        logger.error(f"加载 JSON 文件失败 (JSONDecodeError): {file_path}, Error: {e_json}", exc_info=True)
         return default_return
+    except IOError as e_io:
+        logger.error(f"加载 JSON 文件失败 (IOError): {file_path}, Error: {e_io}", exc_info=True)
+        return default_return
+    except Exception as e_gen: # Catch any other unexpected error
+        logger.error(f"加载 JSON 文件时发生未知错误: {file_path}, Error: {e_gen}", exc_info=True)
+        return default_return
+
 
 def _save_json(file_path: str, data: Any):
     """保存数据到 JSON 文件，处理异常"""
-    _ensure_file(file_path, type(data)()) # 确保文件存在，并传入默认类型
+    _ensure_file(file_path, type(data)()) # _ensure_file now uses logging
     try:
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-    except IOError as e:
-        print(f"[ERROR] 保存 JSON 文件失败: {file_path}, Error: {e}")
+    except IOError as e_io: # More specific exception
+        logger.error(f"保存 JSON 文件失败: {file_path}, Error: {e_io}", exc_info=True)
+    except Exception as e_gen: # Catch any other unexpected error
+        logger.error(f"保存 JSON 文件时发生未知错误: {file_path}, Error: {e_gen}", exc_info=True)
+
 
 def load_roles() -> Dict[str, str]:
     """加载所有角色，返回一个 名字->Prompt 的字典"""
@@ -59,14 +79,20 @@ def add_role(name: str, prompt: str) -> bool:
     roles = load_roles()
     normalized_name = name.strip()
     if not normalized_name:
-        print("[ERROR] 角色名称不能为空")
+        logger.error("角色名称不能为空")
         return False
     if normalized_name in roles:
-        print(f"[ERROR] 角色名称 '{normalized_name}' 已存在")
+        logger.error(f"角色名称 '{normalized_name}' 已存在")
         return False
-    roles[normalized_name] = prompt.strip()
+    
+    stripped_prompt = prompt.strip()
+    if len(stripped_prompt) > MAX_ROLE_PROMPT_LENGTH:
+        logger.error(f"角色 Prompt 过长。允许的最大长度为 {MAX_ROLE_PROMPT_LENGTH} 个字符，当前长度为 {len(stripped_prompt)}。")
+        return False
+        
+    roles[normalized_name] = stripped_prompt
     save_roles(roles)
-    print(f"[INFO] 角色 '{normalized_name}' 添加成功")
+    logger.info(f"角色 '{normalized_name}' 添加成功")
     return True
 
 def edit_role(name: str, new_prompt: str) -> bool:
@@ -74,14 +100,20 @@ def edit_role(name: str, new_prompt: str) -> bool:
     roles = load_roles()
     normalized_name = name.strip()
     if not normalized_name:
-        print("[ERROR] 角色名称不能为空")
+        logger.error("角色名称不能为空")
         return False
     if normalized_name not in roles:
-        print(f"[ERROR] 角色名称 '{normalized_name}' 不存在")
+        logger.error(f"角色名称 '{normalized_name}' 不存在")
         return False
-    roles[normalized_name] = new_prompt.strip()
+
+    stripped_new_prompt = new_prompt.strip()
+    if len(stripped_new_prompt) > MAX_ROLE_PROMPT_LENGTH:
+        logger.error(f"角色 Prompt 过长。允许的最大长度为 {MAX_ROLE_PROMPT_LENGTH} 个字符，当前长度为 {len(stripped_new_prompt)}。")
+        return False
+        
+    roles[normalized_name] = stripped_new_prompt
     save_roles(roles)
-    print(f"[INFO] 角色 '{normalized_name}' 编辑成功")
+    logger.info(f"角色 '{normalized_name}' 编辑成功")
     return True
 
 def delete_role(name: str) -> bool:
@@ -89,14 +121,14 @@ def delete_role(name: str) -> bool:
     roles = load_roles()
     normalized_name = name.strip()
     if not normalized_name:
-        print("[ERROR] 角色名称不能为空")
+        logger.error("角色名称不能为空")
         return False
     if normalized_name not in roles:
-        print(f"[ERROR] 角色名称 '{normalized_name}' 不存在")
+        logger.error(f"角色名称 '{normalized_name}' 不存在")
         return False
     del roles[normalized_name]
     save_roles(roles)
-    print(f"[INFO] 角色 '{normalized_name}' 删除成功")
+    logger.info(f"角色 '{normalized_name}' 删除成功")
     return True
 
 def get_role_names() -> List[str]:
@@ -115,30 +147,30 @@ def set_active_role(chat_id: str, chat_type: str, role_name: Optional[str]):
     if normalized_new_role_name is None:
         if state_key in active_roles: # 之前有特定角色
             del active_roles[state_key]
-            print(f"[INFO] Chat ({chat_id}, {chat_type}) 已切换回默认角色。")
+            logger.info(f"Chat ({chat_id}, {chat_type}) 已切换回默认角色。")
             if old_role is not None: # 确保是从一个非默认角色切换到默认
                  role_switch_flags[state_key] = True
-                 print(f"[DEBUG] Role switch flag set for {state_key} (to default)")
+                 logger.debug(f"Role switch flag set for {state_key} (to default)")
         else:
             # 本来就是默认，无需操作也无需设置 flag
-            print(f"[INFO] Chat ({chat_id}, {chat_type}) 当前已是默认角色，无需切换。")
+            logger.info(f"Chat ({chat_id}, {chat_type}) 当前已是默认角色，无需切换。")
         return True # 切换到默认总是"成功"的
 
     # 处理切换到特定角色的情况
     roles = load_roles()
     if normalized_new_role_name not in roles:
-        print(f"[ERROR] 尝试设置的角色 '{normalized_new_role_name}' 不存在。")
+        logger.error(f"尝试设置的角色 '{normalized_new_role_name}' 不存在。")
         return False # 指示设置失败
 
     # 如果新角色与旧角色不同，或者之前是默认角色，则更新并设置flag
     if old_role != normalized_new_role_name:
         active_roles[state_key] = normalized_new_role_name
         role_switch_flags[state_key] = True
-        print(f"[INFO] Chat ({chat_id}, {chat_type}) 已切换到角色: {normalized_new_role_name}")
-        print(f"[DEBUG] Role switch flag set for {state_key} (to {normalized_new_role_name})")
+        logger.info(f"Chat ({chat_id}, {chat_type}) 已切换到角色: {normalized_new_role_name}")
+        logger.debug(f"Role switch flag set for {state_key} (to {normalized_new_role_name})")
     else:
         # 新旧角色相同，无需操作也无需设置 flag
-        print(f"[INFO] Chat ({chat_id}, {chat_type}) 当前已是角色 '{normalized_new_role_name}'，无需切换。")
+        logger.info(f"Chat ({chat_id}, {chat_type}) 当前已是角色 '{normalized_new_role_name}'，无需切换。")
     
     return True # 指示设置成功
 
@@ -198,19 +230,24 @@ def stage_role_for_approval(name: str, prompt: str, requester_user_id: str, requ
         
     normalized_name = name.strip()
     if not normalized_name:
-        print("[ERROR] 尝试暂存的角色名称为空")
+        logger.error("尝试暂存的角色名称为空")
         return None
-        
+
+    stripped_prompt = prompt.strip()
+    if len(stripped_prompt) > MAX_ROLE_PROMPT_LENGTH:
+        logger.error(f"待审核角色 Prompt 过长。允许的最大长度为 {MAX_ROLE_PROMPT_LENGTH} 个字符，当前长度为 {len(stripped_prompt)}。")
+        return None 
+
     pending_roles[pending_id] = {
         "name": normalized_name,
-        "prompt": prompt.strip(),
+        "prompt": stripped_prompt,
         "requester_user_id": requester_user_id,
         "requester_chat_id": requester_chat_id,
         "requester_chat_type": requester_chat_type,
         "staged_at": int(time.time())
     }
     _save_pending_roles(pending_roles)
-    print(f"[INFO] 角色 '{normalized_name}' 已暂存待审核，ID: {pending_id}")
+    logger.info(f"角色 '{normalized_name}' 已暂存待审核，ID: {pending_id}")
     return pending_id
 
 def get_pending_role(pending_id: str) -> Optional[Dict]:
@@ -224,19 +261,19 @@ def approve_pending_role(pending_id: str) -> Tuple[bool, Optional[Dict]]:
     role_info = pending_roles.get(pending_id)
     
     if not role_info:
-        print(f"[ERROR] 批准失败：找不到待审核 ID {pending_id}")
+        logger.error(f"批准失败：找不到待审核 ID {pending_id}")
         return False, None
         
-    # 尝试添加到主列表
+    # 尝试添加到主列表 (add_role now uses logging)
     if add_role(role_info["name"], role_info["prompt"]):
         # 添加成功，从未决列表中移除
         del pending_roles[pending_id]
         _save_pending_roles(pending_roles)
-        print(f"[INFO] 待审核角色 {pending_id} ('{role_info['name']}') 已批准并添加。")
+        logger.info(f"待审核角色 {pending_id} ('{role_info['name']}') 已批准并添加。")
         return True, role_info
     else:
         # 添加失败（可能名称已存在或写入错误），保留在未决列表供检查
-        print(f"[ERROR] 批准角色 {pending_id} ('{role_info['name']}') 后添加到主列表失败。")
+        logger.error(f"批准角色 {pending_id} ('{role_info['name']}') 后添加到主列表失败。")
         return False, role_info
 
 def reject_pending_role(pending_id: str) -> Tuple[bool, Optional[Dict]]:
@@ -246,10 +283,10 @@ def reject_pending_role(pending_id: str) -> Tuple[bool, Optional[Dict]]:
     
     if role_info:
         _save_pending_roles(pending_roles)
-        print(f"[INFO] 待审核角色 {pending_id} ('{role_info['name']}') 已拒绝。")
+        logger.info(f"待审核角色 {pending_id} ('{role_info['name']}') 已拒绝。")
         return True, role_info
     else:
-        print(f"[ERROR] 拒绝失败：找不到待审核 ID {pending_id}")
+        logger.error(f"拒绝失败：找不到待审核 ID {pending_id}")
         return False, None
 
 def list_pending_roles() -> Dict[str, Dict]:
@@ -262,9 +299,13 @@ def check_and_clear_role_switch_flag(chat_id: str, chat_type: str) -> bool:
     state_key = (chat_id, chat_type)
     switched = role_switch_flags.pop(state_key, False)
     if switched:
-        print(f"[DEBUG] Consumed role switch flag for {state_key}")
+        logger.debug(f"Consumed role switch flag for {state_key}")
     return switched
 
 # 初始化时确保文件存在
+# _ensure_file calls are made at the top level when this module is imported.
+# This means logger might not be fully configured if this module is imported before main.py calls setup_logging().
+# However, get_logger() has a fallback, and _ensure_file itself only logs errors.
+# This should be acceptable.
 _ensure_file(ROLES_FILE)
 _ensure_file(PENDING_ROLES_FILE) 

@@ -3,8 +3,10 @@ import requests
 
 from config import CONFIG
 from utils.files import load_conversation_history, save_conversation_history, get_latest_system_content
-from utils.text import estimate_tokens
+# estimate_tokens is not used, consider removing if not planned for future.
+# from utils.text import estimate_tokens 
 from llm_api import get_ai_response
+from logger import get_logger # Import the new logger
 from context_utils import build_context_within_limit
 import utils.role_manager as role_manager
 from utils.notebook import DEFAULT_ROLE_KEY
@@ -44,7 +46,8 @@ def process_conversation(chat_id, user_input, chat_type="private"):
       4. 调用 AI 接口获取回复，使用 yield 流式返回回复分段
       5. 将 AI 的完整回复加入到对话历史中，并保存
     """
-    print(f"[DEBUG] 开始处理对话 - chat_id: {chat_id}, chat_type: {chat_type}")
+    logger = get_logger(__name__) # Get logger instance
+    logger.debug(f"开始处理对话 - chat_id: {chat_id}, chat_type: {chat_type}")
 
     try:
         # 获取当前激活的角色
@@ -54,9 +57,9 @@ def process_conversation(chat_id, user_input, chat_type="private"):
         system_prompt_content = get_latest_system_content(chat_id, chat_type)
 
         if active_role_name:
-             print(f"[DEBUG] 获取到角色 '{active_role_name}' 的系统内容 (含笔记)")
+             logger.debug(f"获取到角色 '{active_role_name}' 的系统内容 (含笔记)")
         else:
-             print(f"[DEBUG] 获取到默认角色的系统内容 (含全局笔记)")
+             logger.debug(f"获取到默认角色的系统内容 (含全局笔记)")
 
         # 首先附加角色切换提示
         role_selection_instructions = role_manager.get_role_selection_prompt()
@@ -73,7 +76,7 @@ def process_conversation(chat_id, user_input, chat_type="private"):
             event_prompt_content = active_event["prompt_content"]
             event_type = active_event.get("type", "未知类型")
             event_id = active_event.get("id", "未知ID")
-            print(f"[DEBUG] 检测到活动事件，注入事件特定信息: ID {event_id}, Type {event_type}")
+            logger.debug(f"检测到活动事件，注入事件特定信息: ID {event_id}, Type {event_type}")
             active_event_specific_prompt = f"\n\n--- 当前活动事件 ---\n事件类型: {event_type}\n事件ID: {event_id} \n\n事件规则和描述:\n{event_prompt_content}\n\n提醒: 你可以在适当的时候通过生成 \"[event_end:{event_id}]\" 标记来结束此事件。（用户看不到）\n"
             system_prompt_content += active_event_specific_prompt # 将特定事件信息附加到总的system_prompt
 
@@ -84,58 +87,62 @@ def process_conversation(chat_id, user_input, chat_type="private"):
         if role_was_just_switched:
             # 角色刚刚切换，强制使用干净历史
             full_history = [system_message]
-            print(f"[DEBUG] Role was just switched. Starting with clean history for role '{role_key_for_context}'.")
+            logger.debug(f"Role was just switched. Starting with clean history for role '{role_key_for_context}'.")
         else:
             # 角色未切换（或切换信号已处理），加载现有历史
-            full_history = load_conversation_history(chat_id, chat_type)
-            print(f"[DEBUG] Role not switched or flag already cleared. Loading history for role '{role_key_for_context}'. Total {len(full_history)} messages loaded.")
-            # load_conversation_history 内部已确保 system prompt 是最新的
+            full_history = load_conversation_history(chat_id, chat_type) # This function now uses logging
+            logger.debug(f"Role not switched or flag already cleared. Loading history for role '{role_key_for_context}'. Total {len(full_history)} messages loaded.")
+            
             if not isinstance(full_history, list) or not full_history:
-                 print("[Warning] load_conversation_history returned invalid or empty list. Initializing with system message.")
+                 logger.warning("load_conversation_history returned invalid or empty list. Initializing with system message.")
                  full_history = [system_message]
             elif full_history[0].get("role") != "system": # 再次确保第一条是system
-                print("[Warning] Loaded history does not start with system message. Inserting system message.")
+                logger.warning("Loaded history does not start with system message. Inserting system message.")
                 full_history.insert(0, system_message)
 
         user_message_with_role = {"role": "user", "content": user_input, "role_marker": role_key_for_context}
         if isinstance(full_history, list):
              full_history.append(user_message_with_role)
-             print(f"[DEBUG] 已添加用户输入到历史记录，标记角色: {role_key_for_context}")
+             logger.debug(f"已添加用户输入到历史记录，标记角色: {role_key_for_context}")
         else:
-             print("[Error] 无法将用户输入添加到非列表历史记录中。")
-             yield "处理历史记录时发生内部错误。"
+             logger.error("无法将用户输入添加到非列表历史记录中。")
+             yield "处理历史记录时发生内部错误。" # This yield indicates an error message to the user.
              return
 
         context_to_send = build_context_within_limit(full_history, active_role=role_key_for_context)
-        print(f"[DEBUG] 已构建上下文，共 {len(context_to_send)} 条消息 (过滤角色: {role_key_for_context})")
+        logger.debug(f"已构建上下文，共 {len(context_to_send)} 条消息 (过滤角色: {role_key_for_context})")
 
-        if context_to_send and context_to_send[0].get('role') == 'system':
-            print(f"[DEBUG] Final System Prompt sent to AI:\n---\n{context_to_send[0]['content']}\n---")
-        else:
-            print("[DEBUG] Warning: context_to_send does not start with a system message or is empty.")
+        if CONFIG.get("debug_llm_prompt", False): # More specific debug flag
+            if context_to_send and context_to_send[0].get('role') == 'system':
+                logger.debug(f"Final System Prompt sent to AI:\n---\n{context_to_send[0]['content']}\n---")
+            else:
+                logger.debug("Warning: context_to_send does not start with a system message or is empty.")
 
         response_segments = []
         full_response = ""
 
-        print(f"[DEBUG] 开始调用AI接口")
-        for segment in get_ai_response(context_to_send):
-            print(f"[DEBUG] 收到AI回复片段: {segment[:100]}...")
+        logger.debug(f"开始调用AI接口 (get_ai_response)")
+        for segment in get_ai_response(context_to_send): # get_ai_response now uses logging
+            logger.debug(f"收到AI回复片段: {segment[:100].replace(chr(10), '/n')}...")
             response_segments.append(segment)
             yield segment
 
         full_response = "\n".join(response_segments)
-        print(f"[DEBUG] AI回复完成，总长度: {len(full_response)}")
+        logger.debug(f"AI回复完成，总长度: {len(full_response)}")
 
-    except Exception as e:
+    except Exception as e: # Catch-all for errors during conversation processing
         error_msg = f"AI响应出错: {e}"
-        print(f"[ERROR] {error_msg}")
-        yield error_msg
-        full_response = error_msg
+        logger.error(error_msg, exc_info=True) # Log with stack trace
+        yield error_msg # Send error message to user
+        full_response = error_msg # Ensure full_response has the error for history saving
 
     try:
         ai_response_with_role = {"role": "assistant", "content": full_response, "role_marker": role_key_for_context}
-        full_history.append(ai_response_with_role)
-        save_conversation_history(chat_id, full_history, chat_type)
-        print(f"[DEBUG] 已保存对话历史，包含AI回复，标记角色: {role_key_for_context}")
-    except Exception as e:
-        print(f"[ERROR] 保存对话历史时出错: {e}")
+        if isinstance(full_history, list): # Ensure full_history is still a list
+            full_history.append(ai_response_with_role)
+            save_conversation_history(chat_id, full_history, chat_type) # This function now uses logging
+            logger.debug(f"已保存对话历史，包含AI回复，标记角色: {role_key_for_context}")
+        else:
+            logger.error(f"无法保存AI回复，因为full_history不是列表。Chat ID: {chat_id}")
+    except Exception as e_save:
+        logger.error(f"保存对话历史时出错: {e_save}", exc_info=True)

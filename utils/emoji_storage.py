@@ -2,35 +2,71 @@ import json
 import os
 from typing import Dict, Any, Optional, List
 import time
+import json # ensure json is imported for json.JSONDecodeError
+import os
+from typing import Dict, Any, Optional, List
+from logger import get_logger # Import the new logger
+
+logger = get_logger(__name__) # Module-level logger
+
+# 最大存储表情包数量
+MAX_STORED_EMOJIS = 1000
 
 class EmojiStorage:
     def __init__(self):
-        self.storage_file = "data/emoji_storage.json"
+        self.storage_file = os.path.join("data", "emoji_storage.json") # Ensure path is constructed with os.path.join
         self.emoji_data = self._load_storage()
         self._rotation_index = 0  # 轮换起始索引
         self.MAX_EMOJI_PER_PROMPT = 20 # 每次提示中包含的最大表情数
         
+    def _ensure_data_dir_exists(self):
+        """Ensures the 'data' directory exists."""
+        data_dir = os.path.dirname(self.storage_file)
+        if not os.path.exists(data_dir):
+            try:
+                os.makedirs(data_dir)
+                logger.info(f"Created data directory: {data_dir}")
+            except OSError as e_mkdir:
+                logger.error(f"Failed to create data directory {data_dir}: {e_mkdir}", exc_info=True)
+                # Depending on severity, might want to raise an exception here
+                # For now, operations will likely fail if dir doesn't exist.
+
     def _load_storage(self) -> Dict[str, Any]:
         """加载表情包存储文件"""
-        if not os.path.exists("data"):
-            os.makedirs("data")
+        self._ensure_data_dir_exists() # Ensure data directory exists before trying to load
             
         if os.path.exists(self.storage_file):
             try:
                 with open(self.storage_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except Exception as e:
-                print(f"加载表情包存储文件失败: {e}")
+                    data = json.load(f)
+                    if not isinstance(data, dict) or "emojis" not in data or not isinstance(data["emojis"], dict):
+                        logger.warning(f"Emoji storage file {self.storage_file} has invalid format. Initializing with empty storage.")
+                        return {"emojis": {}}
+                    return data
+            except json.JSONDecodeError as e_json:
+                logger.error(f"加载表情包存储文件失败 (JSONDecodeError): {self.storage_file}, Error: {e_json}", exc_info=True)
+                return {"emojis": {}} # Return default on error
+            except IOError as e_io:
+                logger.error(f"加载表情包存储文件失败 (IOError): {self.storage_file}, Error: {e_io}", exc_info=True)
                 return {"emojis": {}}
-        return {"emojis": {}}
+            except Exception as e_gen:
+                logger.error(f"加载表情包存储文件时发生未知错误: {self.storage_file}, Error: {e_gen}", exc_info=True)
+                return {"emojis": {}}
+        else:
+            logger.info(f"Emoji storage file {self.storage_file} not found. Initializing with empty storage.")
+            return {"emojis": {}} # Return default if file doesn't exist
     
     def _save_storage(self):
         """保存表情包数据到文件"""
+        self._ensure_data_dir_exists() # Ensure data directory exists before trying to save
         try:
             with open(self.storage_file, 'w', encoding='utf-8') as f:
                 json.dump(self.emoji_data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"保存表情包数据失败: {e}")
+        except IOError as e_io:
+            logger.error(f"保存表情包数据失败 (IOError): {self.storage_file}, Error: {e_io}", exc_info=True)
+        except Exception as e_gen:
+            logger.error(f"保存表情包数据时发生未知错误: {self.storage_file}, Error: {e_gen}", exc_info=True)
+
     
     def _get_unique_summary(self, base_summary: str) -> str:
         """获取唯一的summary名称"""
@@ -44,8 +80,13 @@ class EmojiStorage:
     def store_emoji(self, message_data: Dict[str, Any]) -> bool:
         """存储表情包数据"""
         try:
-            # 检查是否是表情包消息
+            current_emojis = self.emoji_data.get("emojis", {})
+            if len(current_emojis) >= MAX_STORED_EMOJIS:
+                logger.error(f"存储表情包失败: 表情包总数 ({len(current_emojis)}) 已达上限 ({MAX_STORED_EMOJIS}个)。")
+                return False
+
             if not message_data.get("message") or not isinstance(message_data["message"], list):
+                logger.debug("store_emoji: Message data does not contain a valid message list.")
                 return False
                 
             for msg in message_data["message"]:
@@ -57,9 +98,9 @@ class EmojiStorage:
                         continue
                         
                     # 检查是否已存在相同的emoji_id
-                    if data["emoji_id"] in self.emoji_data["emojis"]:
-                        print(f"[Debug] 跳过重复的表情包: {data['emoji_id']}")
-                        return True
+                    if data["emoji_id"] in current_emojis: # Use current_emojis here
+                        logger.debug(f"跳过重复的表情包: {data['emoji_id']}")
+                        return True # Successfully "processed" by recognizing duplication
                         
                     # 获取基础信息
                     base_summary = data.get("summary", "[未知表情]")
@@ -78,14 +119,18 @@ class EmojiStorage:
                     }
                     
                     # 使用emoji_id作为唯一标识符存储
+                    # Ensure 'emojis' key exists and is a dict
+                    if "emojis" not in self.emoji_data or not isinstance(self.emoji_data["emojis"], dict):
+                        self.emoji_data["emojis"] = {} 
                     self.emoji_data["emojis"][data["emoji_id"]] = emoji_record
                     self._save_storage()
-                    print(f"[Debug] 成功存储新表情包: {unique_summary} (ID: {data['emoji_id']})")
-                    return True
-                    
-            return False
-        except Exception as e:
-            print(f"存储表情包数据时出错: {e}")
+                    logger.debug(f"成功存储新表情包: {unique_summary} (ID: {data['emoji_id']})")
+                    return True # Return True as an emoji was processed/stored
+            
+            logger.debug("store_emoji: No image segment with emoji_id found in message.")
+            return False # No suitable emoji found in message
+        except Exception as e_store:
+            logger.error(f"存储表情包数据时出错: {e_store}", exc_info=True)
             return False
     
     def get_all_emojis(self) -> Dict[str, Any]:
