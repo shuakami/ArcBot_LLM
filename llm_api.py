@@ -47,7 +47,7 @@ def get_ai_response(conversation):
                 break # 正常结束
             try:
                 data = json.loads(line_data)
-                if CONFIG["debug"]: 
+                if CONFIG["debug"]:
                     print(f"[DEBUG] Stream Data: {repr(line_data)}")
             except json.JSONDecodeError as e:
                 # 仅记录 JSON 解析错误，忽略非 JSON 行
@@ -62,15 +62,41 @@ def get_ai_response(conversation):
             if delta:
                 delta = delta.replace("\r\n", "\n")
                 buffer += delta
-                while "[send]" in buffer or (buffer.endswith("\n") and "\n" in buffer):
+                
+                while True:
+                    part_to_yield = None
+                    processed_something = False
+
                     if "[send]" in buffer:
                         part, buffer = buffer.split("[send]", 1)
+                        part_to_yield = part.strip()
+                        processed_something = True
+                    elif "\n" in buffer:
+                        potential_part = buffer.split("\n", 1)[0]
+                        last_open_longtext = potential_part.rfind("[longtext:")
+                        is_inside_longtext = False
+                        if last_open_longtext != -1:
+                            if potential_part.rfind("]") < last_open_longtext:
+                                is_inside_longtext = True
+                        
+                        if is_inside_longtext:
+                            break
+                        else:
+                            if buffer.endswith("\n") or "\n" in buffer:
+                                part, buffer = buffer.split("\n", 1)
+                                part_to_yield = part.strip()
+                                processed_something = True
+                            else:
+                                break
                     else:
-                        part, buffer = buffer.split("\n", 1)
-                    part = part.strip()
-                    if part:
-                        print(f"[DEBUG] 发送回复片段: {part[:50]}...") # 只打印前50个字符
-                        yield part
+                        break
+
+                    if part_to_yield is not None: 
+                         if part_to_yield:
+                            print(f"[DEBUG] 发送回复片段: {part_to_yield[:50]}...")
+                            yield part_to_yield
+                    elif not processed_something:
+                        break
         elif line == "[DONE]":
             print("[DEBUG] 收到[DONE]标记")
             break

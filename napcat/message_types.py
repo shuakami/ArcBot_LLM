@@ -8,6 +8,10 @@ MessageSegment 是所有消息段类型的联合类型。
 """
 from typing import TypedDict, Literal, Union, List, Optional
 
+class GetFriendListAction(TypedDict):
+    action: Literal["get_friend_list"]
+    params: Optional[dict]
+
 class TextSegment(TypedDict):
     type: Literal["text"]
     data: dict  # {"text": str}  # 文本内容

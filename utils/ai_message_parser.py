@@ -53,7 +53,9 @@ async def parse_ai_message_to_segments(
         r"|(?P<emoji>\[emoji\s*:\s*(?P<emoji_id>[^\]]+?)\s*\])"
         r"|(?P<setrole>\[setrole\s*:\s*(?P<setrole_target>[^\]]+?)\s*\])"
         r"|(?P<event>\[event\s*:\s*(?P<event_type>[^:]+?)\s*:\s*(?P<participants>[^:]*?)\s*:\s*(?P<event_prompt>.*?)\s*\\])"
-        r"|(?P<event_end>\[event_end\s*:\s*(?P<event_end_id>[^\]]+?)\])",
+        r"|(?P<event_end>\[event_end\s*:\s*(?P<event_end_id>[^\]]+?)\])"
+        r"|(?P<longtext>\[longtext\s*:\s*(?P<longtext_content>.+?)\s*\])"
+        , 
         re.DOTALL
     )
 
@@ -248,6 +250,12 @@ async def parse_ai_message_to_segments(
                     segments_placeholders.append({
                         "type": "text",
                         "data": {"text": "[emoji:] 标签内容为空喵"}
+                    })
+            elif m.group("longtext"):
+                longtext_content = m.group("longtext_content")
+                if longtext_content:
+                    segments_placeholders.append({
+                        "type": "text", "data": {"text": longtext_content}
                     })
 
             last_idx = m.end()

@@ -66,26 +66,33 @@ async def handle_dragon_logic(group_id: str, self_id: str, sender: IMessageSende
             # --- 方式 B: 调用 AI 打乱接龙 ---
             try:
                 print(f"[DEBUG] 机器人决定调用 AI 打乱接龙: '{last_text}'")
-                disrupt_prompt = f'群里现在好多人在复读刷屏这条消息："{last_text}"。请你回复一句与众不同或者看似接龙但是有错别字的话，来打断或者终结这个无聊的刷屏行为。'
+                # 更新的 Prompt，要求简洁、单句、无特殊标记
+                disrupt_prompt = f'请针对以下群聊中正在复读的内容："{last_text}"，回复一句非常简短、且能出其不意打断当前复读队形的话（或者玩梗）。你的回复必须精炼，只包含这句话本身，不准添加任何其他无关文字、解释或使用特殊格式标记。'
 
-                # 直接在此处处理 AI 调用和发送
                 message_id = str(int(time.time()))
-                for segment_text in process_conversation(group_id, disrupt_prompt, chat_type="group"):
-                    try:
-                        print(f"[DEBUG] AI 打乱回复片段: {segment_text}")
-                        msg_segments = await parse_ai_message_to_segments(
-                            segment_text,
-                            message_id,
-                            chat_id=group_id,
-                            chat_type="group"
-                        )
-                        if msg_segments:
-                            sender.send_group_msg(int(group_id), msg_segments)
-                            await asyncio.sleep(random.uniform(0.5, 1.5)) # 短暂延迟
-                    except Exception as parse_err:
-                        print(f"[ERROR] 解析 AI 打乱回复时出错: {parse_err}")
-                        continue
-                return True # AI 打乱流程完成（无论是否成功发送）
+                
+                # 收集AI返回的所有片段，合并为单个字符串
+                ai_response_parts = []
+                for segment_text_part in process_conversation(group_id, disrupt_prompt, chat_type="group"):
+                    ai_response_parts.append(segment_text_part)
+                
+                full_ai_response_text = "".join(ai_response_parts).strip()
+
+                if full_ai_response_text:
+                    print(f"[DEBUG] AI 打乱完整回复: {full_ai_response_text}")
+                    # 对合并后的完整文本进行一次解析和发送
+                    msg_segments = await parse_ai_message_to_segments(
+                        full_ai_response_text,
+                        message_id,
+                        chat_id=group_id,
+                        chat_type="group"
+                    )
+                    if msg_segments:
+                        sender.send_group_msg(int(group_id), msg_segments) # 只发送一次
+                else:
+                    print("[DEBUG] AI打乱接龙未返回有效内容。")
+
+                return True # AI 打乱流程完成
             except Exception as ai_err:
                 print(f"[ERROR] 调用 AI 打乱接龙时出错: {ai_err}")
                 return False # AI 处理失败

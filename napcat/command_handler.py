@@ -8,10 +8,14 @@ from utils.whitelist import add_whitelist, remove_whitelist
 from napcat.message_sender import IMessageSender
 import utils.role_manager as role_manager
 from typing import Dict, Any
+from napcat.post import get_friend_list, FRIEND_LIST
 
 # 角色添加状态跟踪
 # key: (user_id: str, chat_id: str), value: Dict[str, Any] (e.g., {'state': 'awaiting_prompt', 'type': 'private'})
 user_add_role_state: Dict[tuple[str, str], Dict[str, Any]] = {}
+
+# /role 命令是否仅好友可用，默认为 False
+ROLE_FRIENDS_ONLY = False
 
 def send_reply(msg_dict, reply, sender: IMessageSender):
     """
@@ -39,14 +43,27 @@ def process_command(msg_dict, sender: IMessageSender):
     elif text.startswith("/arcgrouplist"):
         return process_group_list_command(msg_dict, sender)
     elif text.startswith("/role"):
+        # 在处理 /role 命令之前，确保好友列表已加载（如果功能开启）
+        if ROLE_FRIENDS_ONLY and not FRIEND_LIST:
+            # 尝试自动更新一次，如果管理员开启了这个功能但列表为空
+            if sender_qq in admin_qq_list: # 仅管理员触发自动更新
+                get_friend_list()
+                send_reply(msg_dict, "检测到好友限制已开启但列表为空，已尝试自动更新好友列表。请稍后再试。", sender)
+            else:
+                send_reply(msg_dict, "好友列表尚未加载，请稍后重试或联系管理员使用 /updatefriends 更新列表。", sender)
+            return True
+        
+        # 原有的 /role 路由逻辑
         tokens = text.split()
         sub_command = tokens[1].lower() if len(tokens) > 1 else "list"
-        # 检查是否是管理员命令
         if sub_command in ["pending", "approve", "reject"]:
             return process_role_admin_command(msg_dict, sender)
         else:
-            # 普通用户的 /role 命令
-            return process_role_command(msg_dict, sender)
+            return process_role_command(msg_dict, sender) # 普通用户的 /role 命令
+    elif text.startswith("/rolefriendonly"):
+        return process_role_friend_only_command(msg_dict, sender)
+    elif text.startswith("/updatefriends"):
+        return process_update_friends_command(msg_dict, sender)
     return False
 
 
@@ -272,17 +289,25 @@ def process_group_list_command(msg_dict, sender: IMessageSender):
 
 def process_role_command(msg_dict, sender: IMessageSender):
     """
-    处理 /role 命令及其子命令。
+    处理用户 /role 相关命令 (非管理员)
     """
-    text = extract_text_from_message(msg_dict).strip()
+    global ROLE_FRIENDS_ONLY, FRIEND_LIST, user_add_role_state
+    sender_qq = str(msg_dict["sender"]["user_id"])
+
+    # 好友校验逻辑放在最前面
+    if ROLE_FRIENDS_ONLY and sender_qq not in FRIEND_LIST:
+        if sender_qq not in CONFIG["qqbot"].get("whitelist", []):
+             send_reply(msg_dict, "这个功能只对已经添加我好友的人开放喵。", sender)
+             return True
+    
+    text = extract_text_from_message(msg_dict).strip() # 获取纯文本命令
     sender_info = msg_dict["sender"]
     user_id = str(sender_info["user_id"])
     message_type = msg_dict.get("message_type")
-
-    # 确定回复目标 ID
     chat_id = str(msg_dict.get("group_id") if message_type == "group" else user_id)
 
     tokens = text.split()
+    # 第一个 token 应该是 /role, 第二个是子命令 (如果存在)
     sub_command = tokens[1].lower() if len(tokens) > 1 else "list" # 默认为 list
 
     reply = ""
@@ -292,30 +317,30 @@ def process_role_command(msg_dict, sender: IMessageSender):
         state_key = (user_id, chat_id)
         user_add_role_state[state_key] = {
             'state': 'awaiting_prompt',
-            'type': message_type
+            'type': message_type, # 记录消息类型，以便后续正确回复
+            'chat_id': chat_id # 记录chat_id
         }
         reply = "请输入角色 Prompt喵："
-        print(f"[DEBUG] User {user_id} in chat {chat_id} started adding role. State: {user_add_role_state[state_key]}")
+        print(f"[DEBUG] User {user_id} in chat {chat_id} (type: {message_type}) started adding role. State: {user_add_role_state[state_key]}")
 
     elif sub_command == "edit":
         if len(tokens) < 3:
             reply = "请指定要编辑的角色名称：/role edit <角色名称>"
         else:
             role_name_to_edit = " ".join(tokens[2:]).strip() # 支持带空格的角色名
-            # 检查角色是否存在
             existing_roles = role_manager.load_roles()
             if role_name_to_edit not in existing_roles:
                 reply = f"错误：角色模板 '{role_name_to_edit}' 不存在。"
             else:
-                # 进入等待新 Prompt 的状态
                 state_key = (user_id, chat_id)
                 user_add_role_state[state_key] = {
                     'state': 'awaiting_edit_prompt',
                     'type': message_type,
+                    'chat_id': chat_id,
                     'role_name_to_edit': role_name_to_edit
                 }
                 reply = f"请输入 '{role_name_to_edit}' 的新 Prompt喵："
-                print(f"[DEBUG] User {user_id} in chat {chat_id} started editing role '{role_name_to_edit}'. State: {user_add_role_state[state_key]}")
+                print(f"[DEBUG] User {user_id} in chat {chat_id} (type: {message_type}) started editing role '{role_name_to_edit}'. State: {user_add_role_state[state_key]}")
 
     elif sub_command == "delete":
         if len(tokens) < 3:
@@ -328,25 +353,22 @@ def process_role_command(msg_dict, sender: IMessageSender):
                 reply = f"删除角色模板 '{role_name_to_delete}' 失败（可能是名称不存在喵？）。"
 
     elif sub_command == "list":
-        # 显示角色列表
         role_names = role_manager.get_role_names()
         if not role_names:
             reply = "当前还没有任何角色模板喵。使用 /role add 开始添加吧~"
         else:
-            reply = "当前可用角色模板：\n - " + "\n - ".join(role_names)
-            reply += "\n\n使用 /role add|edit|delete <名称> 进行管理。"
+            reply = "当前可用角色模板：\\n - " + "\\n - ".join(role_names)
+            reply += "\\n\\n使用 /role add|edit|delete <名称> 进行管理。\\n使用 /role <角色名称> <你的对话...> - 使用角色"
+
     else:
-        reply = "无效的 /role 子命令喵。\n"
-        reply += "用法: \n"
-        reply += "  /role list (或 /role) - 查看可用角色\n"
-        reply += "---- 管理员命令 ----\n"
-        reply += "  /role pending        - 查看待审核角色\n"
-        reply += "  /role approve <审核ID> - 批准角色\n"
-        reply += "  /role reject <审核ID>  - 拒绝角色\n"
-        reply += "--------------------\n"
-        reply += "  /role add          - 添加新角色 (提交审核)\n"
-        reply += "  /role edit <名称> - 编辑现有角色 (按提示操作)\n"
-        reply += "  /role delete <名称> - 删除指定角色"
+        if len(tokens) > 1 and sub_command not in ["add", "edit", "delete", "list"]:
+             reply = f"无效的 /role 子命令 '{sub_command}' 喵。\\n"
+             reply += "用法: \\n"
+             reply += "  /role list (或 /role) - 查看可用角色\\n"
+             reply += "  /role add          - 添加新角色 (提交审核)\\n"
+             reply += "  /role edit <名称> - 编辑现有角色\\n"
+             reply += "  /role delete <名称> - 删除指定角色\\n"
+             reply += "  /role <角色名称> <你的对话...> - 使用角色"
 
     if reply:
         send_reply(msg_dict, reply, sender)
@@ -439,3 +461,55 @@ def process_role_admin_command(msg_dict, sender: IMessageSender):
         send_reply(msg_dict, reply, sender)
 
     return True # 表示命令已被处理
+
+def process_role_friend_only_command(msg_dict, sender: IMessageSender):
+    """
+    处理 /rolefriendonly [on/off] 命令，切换 /role 命令是否仅好友可用。
+    仅限管理员。
+    """
+    global ROLE_FRIENDS_ONLY
+    text = extract_text_from_message(msg_dict).strip()
+    sender_qq = str(msg_dict["sender"]["user_id"])
+    admin_qq_list = CONFIG["qqbot"].get("admin_qq", [])
+
+    if sender_qq not in admin_qq_list:
+        send_reply(msg_dict, "抱歉，您没有权限执行此命令。", sender)
+        return True
+
+    tokens = text.split()
+    reply_text = ""
+
+    if len(tokens) == 2:
+        mode = tokens[1].lower()
+        if mode == "on":
+            ROLE_FRIENDS_ONLY = True
+            reply_text = "`/role` 命令已设置为仅好友可用喵。"
+            # 如果开启，尝试获取一次好友列表
+            if not FRIEND_LIST:
+                get_friend_list() # 发起获取好友列表的请求
+                reply_text += "\n正在尝试获取好友列表，请稍后检查 `/updatefriends` 的输出或直接使用 `/role`。"
+        elif mode == "off":
+            ROLE_FRIENDS_ONLY = False
+            reply_text = "`/role` 命令已设置为对所有用户开放。"
+        else:
+            reply_text = "命令格式错误。请使用 `/rolefriendonly on` 或 `/rolefriendonly off`。"
+    else:
+        current_status = "开启" if ROLE_FRIENDS_ONLY else "关闭"
+        reply_text = f"当前 `/role` 命令好友限制状态：{current_status}。\n使用 `/rolefriendonly on` 或 `/rolefriendonly off` 进行更改。"
+
+    send_reply(msg_dict, reply_text, sender)
+    return True
+
+def process_update_friends_command(msg_dict, sender: IMessageSender):
+    """
+    处理 /updatefriends 命令，手动触发更新好友列表。
+    """
+    sender_qq = str(msg_dict["sender"]["user_id"])
+    admin_qq_list = CONFIG["qqbot"].get("admin_qq", [])
+        
+    get_friend_list() # 调用 post.py 中的函数
+    reply_text = "更新好了喵。"
+    if FRIEND_LIST:
+        reply_text += f"\n当前已缓存 {len(FRIEND_LIST)} 个好友。"
+    send_reply(msg_dict, reply_text, sender)
+    return True
