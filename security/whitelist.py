@@ -1,7 +1,7 @@
 import os
 import json
 
-from config import CONFIG
+from config import config
 
 WHITELIST_FILE = os.path.join("config", "whitelist.json")
 
@@ -70,6 +70,6 @@ def is_whitelisted(target, is_group=False):
     """
     whitelist = load_whitelist()
     key = "group" if is_group else "msg"
-    if CONFIG.get("debug"):
+    if config.get("debug"):
         print(f"检查白名单[{key}]，目标: {target}, 列表内容: {whitelist.get(key, [])}")
     return target in whitelist[key]

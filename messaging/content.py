@@ -5,7 +5,7 @@
 """
 from typing import Dict, Any, List
 from llm_api import get_ai_response_with_image
-from config import CONFIG
+from config import config
 import os
 import requests
 import tempfile
@@ -55,7 +55,7 @@ def parse_group_message_content(msg_dict: Dict[str, Any]) -> str:
     output_parts: List[str] = []
     temp_files_to_delete: List[str] = []
     should_describe_images = False
-    reply_prefix = CONFIG["qqbot"].get("group_prefix", "#")
+    reply_prefix = config["qqbot"].get("group_prefix", "#") 
 
     for seg in message_segments:
         seg_type = seg.get("type")

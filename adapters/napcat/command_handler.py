@@ -1,56 +1,70 @@
 import os
+import asyncio
 
-from config import CONFIG, save_config
-from utils.blacklist import add_blacklist, remove_blacklist
-from utils.files import get_history_file
-from utils.text import extract_text_from_message
-from utils.whitelist import add_whitelist, remove_whitelist
-from napcat.message_sender import IMessageSender
-import utils.role_manager as role_manager
+from config import config
+from security.blacklist import add_blacklist, remove_blacklist
+from storage.history import get_history_file
+from common.text import extract_text_from_message
+from security.whitelist import add_whitelist, remove_whitelist
+from adapters.base import AbstractAdapter
+import core.role_manager as role_manager
+from . import friend_manager as friend_manager
+from .friend_manager import FRIEND_LIST
 from typing import Dict, Any
 
 # 角色添加状态跟踪
 # key: (user_id: str, chat_id: str), value: Dict[str, Any] (e.g., {'state': 'awaiting_prompt', 'type': 'private'})
 user_add_role_state: Dict[tuple[str, str], Dict[str, Any]] = {}
 
-def send_reply(msg_dict, reply, sender: IMessageSender):
+async def send_reply(msg_dict, reply: str, sender: AbstractAdapter):
     """
     根据消息类型构造回复 payload 并发送回复消息。
     """
-    if msg_dict.get("message_type") == "private":
-        sender.send_private_msg(int(msg_dict["sender"]["user_id"]), reply)
-    else:
-        sender.send_group_msg(int(msg_dict.get("group_id")), reply)
+    chat_type = msg_dict.get("message_type")
+    if chat_type == "private":
+        target_id = msg_dict["sender"]["user_id"]
+    else:  # group
+        target_id = msg_dict.get("group_id")
+
+    message_segments = [{"type": "text", "data": {"text": reply}}]
+
+    await sender.send_message(
+        chat_type=chat_type,
+        target_id=str(target_id),
+        message=message_segments
+    )
 
 
-def process_command(msg_dict, sender: IMessageSender):
+async def process_command(msg_dict, sender: AbstractAdapter):
     text = extract_text_from_message(msg_dict)
-    sender_qq = str(msg_dict["sender"]["user_id"])
-    admin_qq_list = CONFIG["qqbot"].get("admin_qq", [])
 
     if text.startswith("/arcreset"):
-        return process_reset_command(msg_dict, sender)
+        return await process_reset_command(msg_dict, sender)
     elif text.startswith("/archelp"):
-        return process_help_command(msg_dict, sender)
+        return await process_help_command(msg_dict, sender)
     elif text.startswith("/arcblack") or text.startswith("/arcwhite"):
-        return process_listmod_command(msg_dict, sender)
+        return await process_listmod_command(msg_dict, sender)
     elif text.startswith("/arcqqlist"):
-        return process_msg_list_command(msg_dict, sender)
+        return await process_msg_list_command(msg_dict, sender)
     elif text.startswith("/arcgrouplist"):
-        return process_group_list_command(msg_dict, sender)
+        return await process_group_list_command(msg_dict, sender)
+    elif text.startswith("/updatefriends"):
+        return await process_update_friends_command(msg_dict, sender)
+    elif text.startswith("/rolefriendonly"):
+        return await process_role_friend_only_command(msg_dict, sender)
     elif text.startswith("/role"):
         tokens = text.split()
         sub_command = tokens[1].lower() if len(tokens) > 1 else "list"
         # 检查是否是管理员命令
         if sub_command in ["pending", "approve", "reject"]:
-            return process_role_admin_command(msg_dict, sender)
+            return await process_role_admin_command(msg_dict, sender)
         else:
             # 普通用户的 /role 命令
-            return process_role_command(msg_dict, sender)
+            return await process_role_command(msg_dict, sender)
     return False
 
 
-def process_help_command(msg_dict, sender: IMessageSender):
+async def process_help_command(msg_dict, sender: AbstractAdapter):
     """
     处理菜单指令 /archelp，显示管理员相关命令使用方法：
     """
@@ -69,11 +83,11 @@ def process_help_command(msg_dict, sender: IMessageSender):
         "| /arcgrouplist [white/black] - 切换群聊名单模式\n"
     )
 
-    send_reply(msg_dict, help_text, sender)
+    await send_reply(msg_dict, help_text, sender)
     return True
 
 
-def process_reset_command(msg_dict, sender: IMessageSender):
+async def process_reset_command(msg_dict, sender: AbstractAdapter):
     """
     处理 /arcreset 命令：
       - 私聊：任何人发送 /arcreset 重置自己的对话记录
@@ -95,7 +109,7 @@ def process_reset_command(msg_dict, sender: IMessageSender):
         tokens = text.split()
         if len(tokens) >= 2:
             target_group = tokens[1].strip()
-            if sender_qq not in CONFIG["qqbot"].get("admin_qq", []):
+            if sender_qq not in config["qqbot"].get("admin_qq", []):
                 reply = "只有管理员才能重置群聊记录。"
             else:
                 history_file = get_history_file(target_group, chat_type="group")
@@ -115,11 +129,11 @@ def process_reset_command(msg_dict, sender: IMessageSender):
         else:
             reply = "你没有聊天记录。"
 
-    send_reply(msg_dict, reply, sender)
+    await send_reply(msg_dict, reply, sender)
     return True
 
 
-def process_listmod_command(msg_dict, sender: IMessageSender):
+async def process_listmod_command(msg_dict, sender: AbstractAdapter):
     """
     处理黑白名单管理相关指令：
       命令格式统一支持两类对象：QQ 或 群
@@ -139,18 +153,18 @@ def process_listmod_command(msg_dict, sender: IMessageSender):
     text = extract_text_from_message(msg_dict)
     sender_qq = str(msg_dict["sender"]["user_id"])
     reply = None
-    admin_list = CONFIG["qqbot"].get("admin_qq", [])
+    admin_list = config["qqbot"].get("admin_qq", [])
 
     # 判断管理员权限
     if sender_qq not in admin_list:
         reply = "无权限执行该命令。"
-        send_reply(msg_dict, reply, sender)
+        await send_reply(msg_dict, reply, sender)
         return True
 
     tokens = text.split()
     if len(tokens) < 4:
         reply = "命令格式错误，请使用：/arcblack add/remove [QQ/Q群] [msg/group] 或 /arcwhite add/remove [QQ/Q群] [msg/group]"
-        send_reply(msg_dict, reply, sender)
+        await send_reply(msg_dict, reply, sender)
         return True
     # tokens[0] 为命令，如 /arcblack 或 /arcwhite
     # tokens[1] 为 add 或 remove
@@ -222,11 +236,11 @@ def process_listmod_command(msg_dict, sender: IMessageSender):
     else:
         reply = "无效的命令。"
 
-    send_reply(msg_dict, reply, sender)
+    await send_reply(msg_dict, reply, sender)
     return True
 
 
-def process_msg_list_command(msg_dict, sender: IMessageSender):
+async def process_msg_list_command(msg_dict, sender: AbstractAdapter):
     """
     处理修改用户消息名单模式指令：
       - /arcqqlist [white/black]
@@ -241,14 +255,14 @@ def process_msg_list_command(msg_dict, sender: IMessageSender):
     else:
         new_mode = tokens[1].lower()
         # 修改用户消息名单模式配置，并保存到配置文件
-        CONFIG["qqbot"]["qq_list_mode"] = new_mode
-        save_config()
+        config["qqbot"]["qq_list_mode"] = new_mode
+        config.save()
         reply = f"私聊名单模式已切换为 {new_mode}。"
     
-    send_reply(msg_dict, reply, sender)
+    await send_reply(msg_dict, reply, sender)
     return True
 
-def process_group_list_command(msg_dict, sender: IMessageSender):
+async def process_group_list_command(msg_dict, sender: AbstractAdapter):
     """
     处理修改群聊名单模式指令：
       - /arcgrouplist [white/black]
@@ -263,17 +277,26 @@ def process_group_list_command(msg_dict, sender: IMessageSender):
     else:
         new_mode = tokens[1].lower()
         # 修改群聊名单模式配置，并保存到配置文件
-        CONFIG["qqbot"]["group_list_mode"] = new_mode
-        save_config()
+        config["qqbot"]["group_list_mode"] = new_mode
+        config.save()
         reply = f"群聊名单模式已切换为 {new_mode}。"
     
-    send_reply(msg_dict, reply, sender)
+    await send_reply(msg_dict, reply, sender)
     return True
-
-def process_role_command(msg_dict, sender: IMessageSender):
+async def process_role_command(msg_dict, sender: AbstractAdapter):
     """
     处理 /role 命令及其子命令。
     """
+    sender_qq = str(msg_dict["sender"]["user_id"])
+    
+    # 检查好友权限
+    role_friends_only = config.get("qqbot", {}).get("role_friends_only", False)
+    if role_friends_only and sender_qq not in FRIEND_LIST:
+        admin_qq_list = config.get("qqbot", {}).get("admin_qq", [])
+        if sender_qq not in admin_qq_list:
+            await send_reply(msg_dict, "这个功能只对已经添加我为好友的用户开放喵。", sender)
+            return True
+
     text = extract_text_from_message(msg_dict).strip()
     sender_info = msg_dict["sender"]
     user_id = str(sender_info["user_id"])
@@ -349,28 +372,26 @@ def process_role_command(msg_dict, sender: IMessageSender):
         reply += "  /role delete <名称> - 删除指定角色"
 
     if reply:
-        send_reply(msg_dict, reply, sender)
+        await send_reply(msg_dict, reply, sender)
 
     return True # 表示命令已被处理
 
 # +++ 新增管理员审核处理函数 +++
-def process_role_admin_command(msg_dict, sender: IMessageSender):
+async def process_role_admin_command(msg_dict, sender: AbstractAdapter):
     """处理 /role pending, approve, reject 命令"""
     text = extract_text_from_message(msg_dict).strip()
     sender_info = msg_dict["sender"]
     user_id = str(sender_info["user_id"])
-    message_type = msg_dict.get("message_type")
-    chat_id = str(msg_dict.get("group_id") if message_type == "group" else user_id)
 
     # 检查管理员权限
-    admin_qq_list = CONFIG["qqbot"].get("admin_qq", [])
+    admin_qq_list = config["qqbot"].get("admin_qq", [])
     if user_id not in admin_qq_list:
-        send_reply(msg_dict, "抱歉，只有管理员才能执行此操作喵。", sender)
+        await send_reply(msg_dict, "抱歉，只有管理员才能执行此操作喵。", sender)
         return True # 明确拒绝
 
     tokens = text.split()
     if len(tokens) < 2:
-        send_reply(msg_dict, "无效的管理命令。请使用 /role pending, /role approve <ID>, 或 /role reject <ID>", sender)
+        await send_reply(msg_dict, "无效的管理命令。请使用 /role pending, /role approve <ID>, 或 /role reject <ID>", sender)
         return True
 
     admin_sub_command = tokens[1].lower()
@@ -436,6 +457,48 @@ def process_role_admin_command(msg_dict, sender: IMessageSender):
         reply = "无效的管理命令。请使用 /role pending, /role approve <ID>, 或 /role reject <ID>"
 
     if reply:
-        send_reply(msg_dict, reply, sender)
+        await send_reply(msg_dict, reply, sender)
 
     return True # 表示命令已被处理
+
+
+async def process_update_friends_command(msg_dict, sender: AbstractAdapter):
+    """处理 /updatefriends 命令，仅管理员可用。"""
+    sender_qq = str(msg_dict["sender"]["user_id"])
+    admin_qq_list = config.get("qqbot", {}).get("admin_qq", [])
+
+    if sender_qq not in admin_qq_list:
+        await send_reply(msg_dict, "无权限执行该命令。", sender)
+        return True
+
+    await send_reply(msg_dict, "正在后台刷新好友列表...", sender)
+    asyncio.create_task(friend_manager.get_friend_list())
+    return True
+
+async def process_role_friend_only_command(msg_dict, sender: AbstractAdapter):
+    """处理 /rolefriendonly on/off 命令，仅管理员可用。"""
+    sender_qq = str(msg_dict["sender"]["user_id"])
+    admin_qq_list = config.get("qqbot", {}).get("admin_qq", [])
+
+    if sender_qq not in admin_qq_list:
+        await send_reply(msg_dict, "无权限执行该命令。", sender)
+        return True
+
+    text = extract_text_from_message(msg_dict)
+    tokens = text.split()
+    if len(tokens) < 2 or tokens[1].lower() not in ("on", "off"):
+        reply = "命令格式错误，请使用：/rolefriendonly [on/off]"
+    else:
+        new_mode = tokens[1].lower() == "on"
+        # 确保 qqbot 部分存在
+        if "qqbot" not in config:
+            config["qqbot"] = {}
+        config["qqbot"]["role_friends_only"] = new_mode
+        config.save()
+        status = "开启" if new_mode else "关闭"
+        reply = f"“仅好友可用 /role” 模式已 {status}。"
+    
+    await send_reply(msg_dict, reply, sender)
+    return True
+
+

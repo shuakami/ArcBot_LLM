@@ -3,10 +3,10 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from llm_api import get_ai_response_with_image
-from config import CONFIG
+from config import config
 
 # 动态设置 image_ai 配置
-CONFIG["image_ai"] = {
+config["image_ai"] = {
     "api_url": "https://dashscope.aliyuncs.com/api/v1/services/vision/text-image-generation/generation",
     "token": "",
     "model": "qwen-vl-plus"

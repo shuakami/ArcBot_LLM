@@ -5,33 +5,13 @@ import zipfile
 import shutil
 import json
 from packaging.version import parse as parse_version
+from logger import log
+
 try:
     from tqdm import tqdm
     HAS_TQDM = True
 except ImportError:
     HAS_TQDM = False
-
-# ANSI颜色定义
-class LogColor:
-    END = '\033[0m'
-    RED = '\033[31m'
-    GREEN = '\033[32m'
-    YELLOW = '\033[33m'
-    BLUE = '\033[34m'
-    CYAN = '\033[36m'
-    BOLD = '\033[1m'
-
-def log_info(msg):
-    print(f"{LogColor.BLUE}{msg}{LogColor.END}")
-
-def log_success(msg):
-    print(f"{LogColor.GREEN}{msg}{LogColor.END}")
-
-def log_warning(msg):
-    print(f"{LogColor.YELLOW}{msg}{LogColor.END}")
-
-def log_error(msg):
-    print(f"{LogColor.RED}{msg}{LogColor.END}")
 
 # API 端点和镜像列表
 API_URL = "https://webhook.sdjz.wiki/api/latest_release_info"
@@ -61,7 +41,7 @@ def get_latest_release_info():
         response.raise_for_status() # 如果HTTP错误，则抛出异常
         return response.json()
     except requests.exceptions.RequestException as e:
-        print(f"❌ 获取最新版本信息失败: {e}")
+        log.error(f"获取最新版本信息失败: {e}")
         return None
 
 def download_file(url_path, download_path):
@@ -69,7 +49,7 @@ def download_file(url_path, download_path):
     urls_to_try = [mirror.format(path=url_path) for mirror in DOWNLOAD_MIRRORS]
     for i, full_url in enumerate(urls_to_try):
         try:
-            log_info(f"下载 [{i+1}/{len(urls_to_try)}] {full_url}")
+            log.info(f"下载 [{i+1}/{len(urls_to_try)}] {full_url}")
             headers = {}
             if "api.github.com" in full_url:
                 headers['Accept'] = 'application/octet-stream'
@@ -92,12 +72,12 @@ def download_file(url_path, download_path):
                                 print(f"\r下载进度: {percent}%", end='')
                     if total > 0:
                         print()
-            log_success(f"下载成功: {download_path}")
+            log.info(f"下载成功: {download_path}")
             return True
         except requests.exceptions.RequestException as e:
-            log_error(f"从 {full_url} 下载失败: {e}")
+            log.error(f"从 {full_url} 下载失败: {e}")
         except Exception as e:
-            log_error(f"下载过程中发生意外错误: {e}")
+            log.error(f"下载过程中发生意外错误: {e}")
     return False
 
 def update_files(zip_path, target_dir):
@@ -107,12 +87,12 @@ def update_files(zip_path, target_dir):
         shutil.rmtree(temp_extract_dir)
     os.makedirs(temp_extract_dir, exist_ok=True)
     try:
-        log_info(f"开始解压 {zip_path} 到 {temp_extract_dir}...")
+        log.info(f"开始解压 {zip_path} 到 {temp_extract_dir}...")
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             members = zip_ref.namelist()
             first_member = members[0]
             root_folder_in_zip = os.path.normpath(first_member).split(os.sep)[0]
-            log_info(f"Zip 包内的根目录: {root_folder_in_zip}")
+            log.info(f"Zip 包内的根目录: {root_folder_in_zip}")
             if HAS_TQDM:
                 for member in tqdm(members, desc='解压进度', ncols=70):
                     zip_ref.extract(member, temp_extract_dir)
@@ -122,12 +102,12 @@ def update_files(zip_path, target_dir):
                     zip_ref.extract(member, temp_extract_dir)
                     print(f"\r解压进度: {int((idx+1)*100/total)}%", end='')
                 print()
-        log_success("解压完成。")
+        log.info("解压完成。")
         source_dir_to_copy = os.path.join(temp_extract_dir, root_folder_in_zip)
         if not os.path.isdir(source_dir_to_copy):
-            log_warning(f"未在 {temp_extract_dir} 中找到预期的根目录 {root_folder_in_zip}，尝试直接使用解压目录。")
+            log.warning(f"未在 {temp_extract_dir} 中找到预期的根目录 {root_folder_in_zip}，尝试直接使用解压目录。")
             source_dir_to_copy = temp_extract_dir
-        log_info(f"开始更新文件到 {target_dir}...")
+        log.info(f"开始更新文件到 {target_dir}...")
         items = [item for item in os.listdir(source_dir_to_copy)]
         if HAS_TQDM:
             bar = tqdm(items, desc='替换进度', ncols=70)
@@ -148,13 +128,13 @@ def update_files(zip_path, target_dir):
                 print(f"\r替换进度: {int((idx+1)*100/len(items))}%", end='')
         if not HAS_TQDM:
             print()
-        log_success("文件更新完成。")
+        log.info("文件更新完成。")
         return True
     except zipfile.BadZipFile:
-        log_error(f"解压失败: {zip_path} 不是一个有效的zip文件或已损坏。")
+        log.error(f"解压失败: {zip_path} 不是一个有效的zip文件或已损坏。")
         return False
     except Exception as e:
-        log_error(f"更新文件过程中发生错误: {e}")
+        log.error(f"更新文件过程中发生错误: {e}")
         return False
     finally:
         if os.path.exists(temp_extract_dir):
@@ -163,27 +143,27 @@ def update_files(zip_path, target_dir):
             try:
                 os.remove(zip_path)
             except OSError as e:
-                log_warning(f"无法删除下载的zip文件 {zip_path}: {e}")
+                log.warning(f"无法删除下载的zip文件 {zip_path}: {e}")
 
 def write_current_version(version_str):
     """将当前版本写入文件"""
     with open(VERSION_FILE, 'w') as f:
         f.write(str(version_str))
-    print(f"本地版本已更新为: {version_str}")
+    log.info(f"本地版本已更新为: {version_str}")
 
 def restart_program():
     """重启当前程序"""
-    print("准备重启程序...")
+    log.info("准备重启程序...")
     try:
         os.execv(sys.executable, ['python'] + sys.argv)
     except Exception as e:
-        print(f"❌ 重启失败: {e}。请手动重启程序。")
+        log.error(f"重启失败: {e}。请手动重启程序。")
 
 def check_and_update():
     """检查更新的主函数"""
-    print("正在检查更新...")
+    log.info("正在检查更新...")
     current_v = get_current_version()
-    print(f"当前本地版本: {current_v}")
+    log.info(f"当前本地版本: {current_v}")
 
     latest_info = get_latest_release_info()
     if not latest_info:
@@ -191,28 +171,28 @@ def check_and_update():
 
     latest_v_str = latest_info.get("latest_version")
     if not latest_v_str:
-        print("❌ API响应中未找到 latest_version 字段。")
+        log.error("API响应中未找到 latest_version 字段。")
         return
         
     latest_v = parse_version(latest_v_str)
-    print(f"最新可用版本: {latest_v}")
+    log.info(f"最新可用版本: {latest_v}")
 
     if latest_v > current_v:
-        print(f"✨ 发现新版本 {latest_v}！")
-        print("📄 更新内容:")
+        log.info(f"✨ 发现新版本 {latest_v}！")
+        log.info("📄 更新内容:")
         release_notes = latest_info.get("release_notes", "未提供更新日志。").strip()
         for line in release_notes.split('\n'): # 逐行打印，更好看
-            print(f"  {line}")
+            log.info(f"  {line}")
         
         user_input = input("❓ 是否要下载并更新到最新版本? (y/N): ").strip().lower()
         if user_input != 'y':
-            print(" отказался от обновления. (用户取消更新)")
+            log.info("用户取消更新")
             return
 
-        print("🚀 开始更新...")
+        log.info("🚀 开始更新...")
         zip_url_from_api = latest_info.get("source_code_zip_url")
         if not zip_url_from_api or "api.github.com" not in zip_url_from_api:
-            print(f"❌ API返回的 source_code_zip_url 无效或格式不符合预期: {zip_url_from_api}")
+            log.error(f"API返回的 source_code_zip_url 无效或格式不符合预期: {zip_url_from_api}")
             return
 
         # 从API URL中提取仓库所有者和名称
@@ -223,7 +203,7 @@ def check_and_update():
             # tag_name 应该是 latest_v_str
             github_path_for_mirrors = f"{repo_slug}/archive/refs/tags/{latest_v_str}.zip"
         except IndexError:
-            print(f"❌ 无法从API URL解析仓库信息: {zip_url_from_api}")
+            log.error(f"无法从API URL解析仓库信息: {zip_url_from_api}")
             return
 
         download_target_zip = "_latest_version.zip"
@@ -232,25 +212,25 @@ def check_and_update():
         urls_for_download_logic = [DOWNLOAD_MIRRORS[0].format(path=github_path_for_mirrors)] + \
                                    [mirror.format(path=github_path_for_mirrors) for mirror in DOWNLOAD_MIRRORS[1:]]
         
-        print(f"将尝试从以下源下载 {github_path_for_mirrors}:")
+        log.info(f"将尝试从以下源下载 {github_path_for_mirrors}:")
 
         if download_file(github_path_for_mirrors, download_target_zip):
             if update_files(download_target_zip, "."):
                 write_current_version(latest_v_str)
-                print("更新成功！程序即将重启。")
+                log.info("更新成功！程序即将重启。")
                 restart_program()
             else:
-                print("❌ 更新失败，文件替换过程中发生错误。请检查日志。")
+                log.error("更新失败，文件替换过程中发生错误。请检查日志。")
                 # 尝试清理下载的文件
                 if os.path.exists(download_target_zip):
                     try:
                         os.remove(download_target_zip)
                     except OSError as e:
-                        print(f"⚠️ 无法删除未成功更新的zip文件 {download_target_zip}: {e}")
+                        log.warning(f"⚠️ 无法删除未成功更新的zip文件 {download_target_zip}: {e}")
         else:
-            print("❌ 更新失败，所有下载源均无法下载最新版本。")
+            log.error("更新失败，所有下载源均无法下载最新版本。")
     else:
-        print("当前已是最新版本")
+        log.info("当前已是最新版本")
 
 if __name__ == "__main__":
-    check_and_update() 
+    check_and_update()

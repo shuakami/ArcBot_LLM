@@ -1,11 +1,12 @@
 {
-  "debug": false,
+  "debug": true,
+  "adapter": "napcat",
   "qqbot": {
     "ws_url": "ws://localhost:3005/",
     "token": "admin123456",
     "admin_qq": [
       "2049374069"
-        ],
+    ],
     "qq_list_mode": "black",
     "group_list_mode": "black",
     "group_prefix": "!",
@@ -24,5 +25,9 @@
     "token": "sk-2d84d19d34784fc5a9ee1ebb831f356c",
     "model": "qwen-vl-max",
     "max_context_tokens": 15000
+  },
+  "logging": {
+    "log_level": "INFO",
+    "log_file": "logs/arcbot.log"
   }
 }

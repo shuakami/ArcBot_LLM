@@ -1,194 +1,185 @@
 import json
 import requests
 import base64
-from config import CONFIG
+import re
+from typing import Iterator, Dict, Any, List
 
-def get_ai_response(conversation):
-    """
-    调用 AI 接口，基于 conversation 内容进行流式返回。
-    参数:
-      conversation: 包含对话上下文消息的列表，格式符合 AI 接口要求
-    返回:
-      通过 yield 分段返回 AI 回复内容；如果遇到错误则抛出异常。
-    """
-    print(f"[DEBUG] 准备调用AI接口，对话上下文包含 {len(conversation)} 条消息")
-    
+from config import config
+from logger import log
+
+# --- 辅助函数 ---
+
+def _encode_image_to_base64(image_path: str) -> str:
+    """将图片文件编码为 Base64 字符串。"""
+    try:
+        with open(image_path, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+    except Exception as e:
+        log.error(f"读取或编码图片文件失败: {e}")
+        raise IOError(f"处理本地图片文件失败: {e}") from e
+
+def _stream_response_generator(response: requests.Response) -> Iterator[str]:
+    """从流式响应中逐块生成内容。"""
+    buffer = ""
+    # 正则表达式，用于匹配 [send] 或 [longtext:...] 标记
+    # re.DOTALL 使得 '.' 可以匹配包括换行符在内的任意字符
+    splitter = re.compile(r'(\[send\]|\[longtext:.*?\])', re.DOTALL)
+
+    for line in response.iter_lines(decode_unicode=True):
+        if not line or not line.startswith("data:"):
+            continue
+
+        line_data = line[len("data:"):].strip()
+        if line_data == "[DONE]":
+            break
+        
+        try:
+            data = json.loads(line_data)
+            delta = data.get("choices", [{}])[0].get("delta", {}).get("content")
+            if not delta:
+                continue
+
+            buffer += delta
+
+            # 使用正则表达式进行分割
+            parts = splitter.split(buffer)
+            
+            # parts 会是 [text, separator, text, separator, ...] 的形式
+            # 我们需要处理成对的部分
+            i = 0
+            while i + 1 < len(parts):
+                text_part = parts[i]
+                separator = parts[i+1]
+                
+                if text_part.strip():
+                    yield text_part.strip()
+                
+                # 如果分隔符是 longtext，则把它作为一个整体 yield
+                if separator.startswith('[longtext:'):
+                    yield separator
+                
+                i += 2
+            
+            # 剩下的部分放回 buffer
+            buffer = parts[-1]
+
+        except json.JSONDecodeError:
+            log.warning(f"无法解析流式 JSON 响应: {line_data}")
+            continue
+        except Exception as e:
+            log.error(f"处理流式响应时出错: {e}, line: {line_data}", exc_info=True)
+            continue
+            
+    if buffer.strip():
+        yield buffer.strip()
+
+# --- 主要 API 函数 ---
+
+def get_ai_response(conversation: List[Dict[str, Any]]) -> Iterator[str]:
+    """调用 AI 接口，并以流式方式返回响应块。"""
+    api_url = config["ai"]["api_url"]
     headers = {
-        "Authorization": f"Bearer {CONFIG['ai']['token']}",
+        "Authorization": f"Bearer {config['ai']['token']}",
         "Content-Type": "application/json"
     }
     payload = {
-        "model": CONFIG["ai"]["model"],
+        "model": config["ai"]["model"],
         "messages": conversation,
         "stream": True
     }
     
-    api_url = CONFIG["ai"]["api_url"]
-    print(f"[DEBUG] 发送请求到 {api_url}")
-    response = requests.post(api_url, headers=headers, json=payload, stream=True)
+    log.debug(f"向 {api_url} 发送流式请求...")
+    try:
+        response = requests.post(api_url, headers=headers, json=payload, stream=True, timeout=120)
+        response.raise_for_status()
+        log.debug("开始接收流式响应...")
+        yield from _stream_response_generator(response)
+        log.debug("AI接口调用完成")
+    except requests.RequestException as e:
+        log.error(f"AI接口请求失败: {e}")
+        raise ConnectionError(f"AI接口请求失败: {e}") from e
+
+def get_ai_response_with_image(
+    conversation: List[Dict[str, Any]], image: str, image_type: str = "url"
+) -> str:
+    """调用多模态AI接口，处理包含图片的消息。"""
+    api_url = config['image_ai']['api_url']
+    token = config['image_ai']['token']
+    model = config['image_ai']['model']
     
-    if response.status_code != 200:
-        error_msg = f"AI接口调用失败, 状态码：{response.status_code}, {response.text}"
-        print(f"[ERROR] {error_msg}")
-        raise Exception(error_msg)
+    if image_type == "file":
+        image = _encode_image_to_base64(image)
+        image_type = "base64"
 
-    print("[DEBUG] 开始接收流式响应")
-    buffer = ""
-    for line in response.iter_lines(decode_unicode=True):
-        line = line.strip() # 先去除两端空白
-        if not line:
-            continue # 跳过空行
-
-        # 严格检查是否为 SSE 数据或结束标记
-        if line.startswith("data:"):
-            line_data = line[len("data:"):].strip()
-            if line_data == "[DONE]":
-                print("[DEBUG] 收到流式响应结束标记")
-                break # 正常结束
-            try:
-                data = json.loads(line_data)
-                if CONFIG["debug"]: 
-                    print(f"[DEBUG] Stream Data: {repr(line_data)}")
-            except json.JSONDecodeError as e:
-                # 仅记录 JSON 解析错误，忽略非 JSON 行
-                print(f"[ERROR] 解析流式 JSON 响应出错: {e}, line内容: {repr(line_data)}")
-                continue
-            except Exception as e:
-                print(f"[ERROR] 处理流式响应时发生未知错误: {e}, line内容: {repr(line_data)}")
-                continue
-            
-            # 提取内容
-            delta = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
-            if delta:
-                delta = delta.replace("\r\n", "\n")
-                buffer += delta
-                while "[send]" in buffer or (buffer.endswith("\n") and "\n" in buffer):
-                    if "[send]" in buffer:
-                        part, buffer = buffer.split("[send]", 1)
-                    else:
-                        part, buffer = buffer.split("\n", 1)
-                    part = part.strip()
-                    if part:
-                        print(f"[DEBUG] 发送回复片段: {part[:50]}...") # 只打印前50个字符
-                        yield part
-        elif line == "[DONE]":
-            print("[DEBUG] 收到[DONE]标记")
-            break
-
-    # 输出剩余内容
-    if buffer.strip():
-        final_part = buffer.strip()
-        print(f"[DEBUG] 发送最后的回复片段: {final_part[:50]}...") # 只打印前50个字符
-        yield final_part
-    
-    print("[DEBUG] AI接口调用完成")
-
-def get_ai_response_with_image(conversation, image=None, image_type="url"):
-    """
-    自动判断API类型：
-    - 如果image_ai.api_url包含'dashscope.aliyuncs.com'，用dashscope SDK
-    - 否则用OpenAI兼容HTTP请求
-    """
-    api_url = CONFIG['image_ai']['api_url']
-    token = CONFIG['image_ai']['token']
-    model = CONFIG['image_ai']['model']
-    print(f"[DEBUG] get_ai_response_with_image: Using API URL='{api_url}', Model='{model}'")
-
-    # 自动处理本地图片为base64
-    original_image_type = image_type
-    if image_type == "file" and image:
-        print(f"[DEBUG] get_ai_response_with_image: Converting file to base64: '{image}'")
-        try:
-            with open(image, "rb") as f:
-                image = base64.b64encode(f.read()).decode()
-            image_type = "base64"
-            print("[DEBUG] get_ai_response_with_image: File converted to base64 successfully.")
-        except Exception as e:
-             print(f"[ERROR] get_ai_response_with_image: Failed to read or encode file: {e}")
-             raise Exception(f"处理本地图片文件失败: {e}")
-
-    print(f"[DEBUG] get_ai_response_with_image: Final image_type='{image_type}'")
-
-    # 判断是否为阿里云DashScope
     if "dashscope.aliyuncs.com" in api_url:
-        try:
-            import dashscope
-        except ImportError:
-             print("[ERROR] DashScope library not found. Please install with: pip install dashscope")
-             raise Exception("未检测到dashscope库，请先安装：pip install dashscope")
-        
-        dashscope.api_key = token
-        messages = []
-        for msg in conversation:
-            if msg["role"] == "user" and image:
-                content = []
-                if "content" in msg:
-                    if isinstance(msg["content"], str):
-                        content.append({"text": msg["content"]})
-                    elif isinstance(msg["content"], list):
-                        content.extend(msg["content"])
-                if image_type == "base64":
-                    content.append({"image": f"data:image/png;base64,{image}"})
-                else:
-                    content.append({"image": image})
-                messages.append({"role": msg["role"], "content": content})
-            else:
-                messages.append(msg)
-        print(f"[DEBUG] DashScope Request: model='{model}', messages_structure={[m['role'] for m in messages]}")
-        try:
-            response = dashscope.MultiModalConversation.call(
-                model=model,
-                messages=messages
-            )
-            print(f"[DEBUG] DashScope Response Status: {response.status_code}")
-            if response.status_code == 200:
-                content = response.output.choices[0].message.content
-                print(f"[DEBUG] DashScope Response Success, content='{content[:100]}...'")
-                return content
-            else:
-                print(f"[ERROR] DashScope API Call Failed: Code={response.code}, Message={response.message}")
-                raise Exception(f"调用失败: {response.code}, {response.message}")
-        except Exception as e:
-            print(f"[ERROR] Calling DashScope API failed: {str(e)}")
-            raise Exception(f"调用DashScope API失败: {str(e)}")
+        return _call_dashscope_api(conversation, image, image_type, token, model)
     else:
-        # OpenAI兼容HTTP请求
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        }
-        messages = list(conversation)
-        if image:
-            image_obj = None
-            if image_type == "base64":
-                image_obj = {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image}"}}
+        return _call_openai_compatible_api(conversation, image, image_type, token, model, api_url)
+
+# --- 特定 API 的实现 ---
+
+def _build_multimodal_message(
+    conversation: List[Dict[str, Any]], image_url: str
+) -> List[Dict[str, Any]]:
+    """为多模态请求构建消息体。"""
+    messages = list(conversation)
+    image_content = {"type": "image_url", "image_url": {"url": image_url}}
+
+    # 将图片添加到最后一个用户消息中
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            if isinstance(msg.get("content"), list):
+                msg["content"].append(image_content)
             else:
-                image_obj = {"type": "image_url", "image_url": {"url": image}}
-            if messages and messages[-1].get("role") == "user":
-                if "content" in messages[-1] and isinstance(messages[-1]["content"], list):
-                    messages[-1]["content"].append(image_obj)
-                elif "content" in messages[-1]:
-                    messages[-1]["content"] = [messages[-1]["content"], image_obj]
-                else:
-                    messages[-1]["content"] = [image_obj]
-            else:
-                messages.append({"role": "user", "content": [image_obj]})
-        print(f"[DEBUG] OpenAI-Compat Request: url='{api_url}', model='{model}', messages_structure={[m['role'] for m in messages]}")
-        payload = {
-            "model": model,
-            "messages": messages,
-            "stream": False
-        }
-        try:
-            response = requests.post(api_url, headers=headers, json=payload)
-            print(f"[DEBUG] OpenAI-Compat Response Status: {response.status_code}")
-            if response.status_code != 200:
-                 print(f"[ERROR] OpenAI-Compat API Call Failed: Status={response.status_code}, Response Text='{response.text}'")
-                 raise Exception(f"AI接口调用失败, 状态码：{response.status_code}, {response.text}")
-            data = response.json()
-            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            print(f"[DEBUG] OpenAI-Compat Response Success, content='{content[:100]}...'")
-            return content
-        except Exception as e:
-            print(f"[ERROR] Calling OpenAI-Compat API failed: {str(e)}")
-            raise Exception(f"调用OpenAI兼容API失败: {str(e)}") 
+                msg["content"] = [
+                    {"type": "text", "text": msg.get("content", "")},
+                    image_content
+                ]
+            return messages
+    
+    # 如果没有用户消息，则创建一个新的
+    messages.append({"role": "user", "content": [image_content]})
+    return messages
+
+def _call_dashscope_api(
+    conversation: List[Dict[str, Any]], image: str, image_type: str, token: str, model: str
+) -> str:
+    """调用 DashScope (通义千问) 多模态 API。"""
+    try:
+        import dashscope
+    except ImportError:
+        raise ImportError("未找到 DashScope 库，请运行 'pip install dashscope'。")
+        
+    dashscope.api_key = token
+    image_url = f"data:image/png;base64,{image}" if image_type == "base64" else image
+    messages = _build_multimodal_message(conversation, image_url)
+
+    log.debug(f"DashScope 请求: model='{model}'")
+    try:
+        response = dashscope.MultiModalConversation.call(model=model, messages=messages)
+        if response.status_code == 200:
+            return response.output.choices[0].message.content
+        else:
+            raise ConnectionError(f"DashScope API 调用失败: {response.code}, {response.message}")
+    except Exception as e:
+        log.error(f"调用 DashScope API 时发生异常: {e}")
+        raise ConnectionError(f"调用 DashScope API 失败: {e}") from e
+
+def _call_openai_compatible_api(
+    conversation: List[Dict[str, Any]], image: str, image_type: str, token: str, model: str, api_url: str
+) -> str:
+    """调用兼容 OpenAI 的多模态 API。"""
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    image_url = f"data:image/png;base64,{image}" if image_type == "base64" else image
+    messages = _build_multimodal_message(conversation, image_url)
+    payload = {"model": model, "messages": messages, "stream": False}
+
+    log.debug(f"OpenAI 兼容接口请求: url='{api_url}', model='{model}'")
+    try:
+        response = requests.post(api_url, headers=headers, json=payload, timeout=120)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    except requests.RequestException as e:
+        log.error(f"调用 OpenAI 兼容 API 失败: {e}")
+        raise ConnectionError(f"调用 OpenAI 兼容 API 失败: {e}") from e

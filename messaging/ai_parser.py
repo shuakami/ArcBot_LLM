@@ -1,291 +1,218 @@
 import re
 import asyncio
 import aiohttp
-import urllib.parse
-import time
-from datetime import datetime
-from typing import List, Optional, Dict, Any
-from napcat.message_types import MessageSegment
-from utils.notebook import notebook, DEFAULT_ROLE_KEY
-from utils.files import load_conversation_history
-from utils.music_handler import fetch_music_data
-from utils.emoji_storage import emoji_storage
-import utils.role_manager as role_manager
-import utils.event_manager as event_manager
+from typing import List, Optional, Tuple, Dict, Any
 
+from adapters.napcat.message_types import MessageSegment
+from storage.notebook import notebook, DEFAULT_ROLE_KEY
+from handlers.music_handler import fetch_music_data
+from storage.emoji_storage import emoji_storage
+import core.role_manager as role_manager
+import core.event_manager as event_manager
+from logger import log
+
+# --- 预编译的正则表达式 ---
+
+# 匹配所有静默标记，用于第一轮清理
+SILENT_TAG_PATTERN = re.compile(
+    r"\[(note|setrole|event|event_end):.*?\]", re.DOTALL
+)
+
+# 匹配所有可见的功能标记
+VISIBLE_TAG_PATTERN = re.compile(
+    r"\[(reply|@qq|CQ:at|music|poke|emoji|longtext):.*?\]", re.DOTALL
+)
+
+# --- 辅助函数 ---
+
+def _clean_tag_content(content: Optional[str]) -> str:
+    """清理标签内容中的多余空白。"""
+    if content is None:
+        return ""
+    return re.sub(r'\s+', ' ', content.strip())
+
+# --- 核心解析逻辑 ---
 
 async def parse_ai_message_to_segments(
     text: str,
-    current_msg_id: Optional[int] = None,
+    message_id: Optional[str] = None,
     chat_id: Optional[str] = None,
-    chat_type: str = "private"
+    chat_type: str = "private",
+    active_role_name: Optional[str] = None,
+    session: Optional[aiohttp.ClientSession] = None
 ) -> List[MessageSegment]:
     """
     解析AI输出，将结构化标记转为MessageSegment。
-    支持：
-      - [reply] 或 [reply:消息ID]：回复消息
-      - [@qq:QQ号] 或 [CQ:at,qq=QQ号]：@某人
-      - [music:歌曲名] 或 [music:歌曲名-歌手]：自动搜索并发送音乐卡片 (并行处理)
-      - [note:内容] 或 [note:内容:context]：静默记录笔记（不会发送任何消息）
-        如果带有:context参数，会自动保存最近5条对话作为上下文
-      - [note:笔记ID:delete]：删除指定ID的笔记
-      - [poke:QQ号]：群聊中戳一戳某人（仅限群聊）
-      - [emoji:表情包ID]：发送表情包
-      - [setrole:角色]：设置角色
-      - [event:事件类型:参与者QQ号列表:事件Prompt内容]：触发事件
-      - [event_end:事件ID]：结束事件 (暂时取消这个，主要依赖超时)
-    其余内容作为text消息段。
     """
-    print(f"[Debug] AI Parser: Received raw text: {text}")
-    
-    # 如果消息只包含[reply]标记，直接返回空列表
-    if text.strip() == "[reply]":
+    log.debug(f"AI_Parser: 开始解析AI消息, 传入 active_role_name='{active_role_name}'")
+    log.debug(f"AI_Parser: 原始文本: \"{text}\"")
+
+    if not chat_id:
+        log.warning("AI_Parser: chat_id 缺失, 部分功能将禁用。")
+        return [{"type": "text", "data": {"text": text}}] if text else []
+
+    # 步骤 1: 处理静默标记
+    cleaned_text = await _handle_silent_tags(text, chat_id, chat_type, active_role_name)
+
+    if not cleaned_text.strip():
+        log.debug("AI_Parser: 清理静默标记后文本为空，解析结束。")
         return []
-        
-    segments_placeholders: List[Optional[MessageSegment]] = []
-    pattern = re.compile(
-        r"(?P<reply>\[reply(?:\s*:\s*(?P<reply_id>\d+))?\])"
-        r"|(?P<at1>\[@qq\s*:\s*(?P<at_qq1>\d+)\])"
-        r"|(?P<at2>\[CQ:at,qq=(?P<at_qq2>\d+)\])"
-        r"|(?P<music>\[music\s*:\s*(?P<music_query>[^\]]+?)\s*\])"
-        r"|(?P<note>\[note\s*:\s*(?P<note_content>.*?)(?:\\s*:\\s*(?P<note_action>delete))?\\s*\])"
-        r"|(?P<poke>\[poke\s*:\s*(?P<poke_qq>\d+)\])"
-        r"|(?P<emoji>\[emoji\s*:\s*(?P<emoji_id>[^\]]+?)\s*\])"
-        r"|(?P<setrole>\[setrole\s*:\s*(?P<setrole_target>[^\]]+?)\s*\])"
-        r"|(?P<event>\[event\s*:\s*(?P<event_type>[^:]+?)\s*:\s*(?P<participants>[^:]*?)\s*:\s*(?P<event_prompt>.*?)\s*\\])"
-        r"|(?P<event_end>\[event_end\s*:\s*(?P<event_end_id>[^\]]+?)\])",
-        re.DOTALL
+
+    # 步骤 2: 解析可见标记
+    segments = await _parse_visible_tags(
+        cleaned_text, message_id, chat_id, chat_type, session
     )
+    log.debug(f"AI_Parser: 解析完成, 生成 {len(segments)} 个消息段。")
+    return segments
 
-    def clean_matched_group(group: Optional[str]) -> Optional[str]:
-        """清理匹配组的文本，移除多余空格"""
-        if group is None:
-            return None
-        return re.sub(r'\s+', ' ', group.strip())
 
-    # 1) 先处理静默标记（note, setrole, event, event_end）
-    silent_tags_processed = False
-    # 在循环外获取一次当前角色，避免重复查询
-    current_role_name = None
-    # 直接使用导入的常量 DEFAULT_ROLE_KEY
-    role_key_for_notes = DEFAULT_ROLE_KEY
-    if chat_id and chat_type:
-        current_role_name = role_manager.get_active_role(chat_id, chat_type)
-        if current_role_name:
-            role_key_for_notes = current_role_name # 如果有激活角色，使用角色名作为key
-        print(f"[Debug] Current role for notes in chat ({chat_id}, {chat_type}): {role_key_for_notes}")
-        
-    for m in pattern.finditer(text):
-        if m.group("note"):
-            note_content = clean_matched_group(m.group("note_content"))
-            note_action = clean_matched_group(m.group("note_action"))
+async def _handle_silent_tags(text: str, chat_id: str, chat_type: str, active_role_name: Optional[str]) -> str:
+    """
+    查找并处理所有静默标记，返回一个移除了这些标记的干净文本。
+    """
+    # 优先使用传入的角色名，如果未传入，则回退到从 role_manager 获取
+    role_for_processing = active_role_name or role_manager.get_active_role(chat_id, chat_type) or DEFAULT_ROLE_KEY
+    log.debug(f"AI_Parser: _handle_silent_tags 使用的角色是: '{role_for_processing}'")
+
+    for m in SILENT_TAG_PATTERN.finditer(text):
+        full_tag = m.group(0)
+        log.debug(f"AI_Parser: 发现静默标记: {full_tag}")
+        try:
+            tag_type, content = full_tag[1:-1].split(":", 1)
             
-            # 如果 chat_id 或 chat_type 不存在，无法确定角色，强制使用全局笔记
-            if not chat_id or not chat_type:
-                # 直接使用导入的常量 DEFAULT_ROLE_KEY
-                current_role_key = DEFAULT_ROLE_KEY
-                print(f"[Warning] chat_id or chat_type missing, forcing notes to {current_role_key}")
-            else:
-                 current_role_key = role_key_for_notes # 使用循环外获取的角色key
-
-            if note_content:
-                if note_action == "delete":
-                    try:
-                        note_id = int(note_content)
-                        if notebook.delete_note(note_id, role=current_role_key):
-                            print(f"[Debug] Note deleted for role '{current_role_key}': ID {note_id}")
-                        else:
-                            print(f"[Debug] Failed to delete note for role '{current_role_key}': ID {note_id} not found")
-                    except ValueError:
-                        print(f"[Debug] Invalid note ID for deletion: {note_content}")
+            if tag_type == "note":
+                if ":" in content and content.endswith(":delete"):
+                    note_id_str = content.rsplit(":", 1)[0]
+                    notebook.delete_note(int(note_id_str), role=role_for_processing)
+                    log.info(f"AI_Parser: 已为角色 '{role_for_processing}' 删除笔记 ID {note_id_str}。")
                 else:
-                    new_note_id = notebook.add_note(note_content, role=current_role_key)
-                    if new_note_id != -1:
-                        print(f"[Debug] Note added for role '{current_role_key}': {note_content} with ID {new_note_id}")
-                    else:
-                        print(f"[Error] Failed to add note for role '{current_role_key}'")
-                        
-            silent_tags_processed = True
-        elif m.group("setrole"):
-            target_role = clean_matched_group(m.group("setrole_target"))
-            if target_role and chat_id and chat_type: 
-                print(f"[DEBUG] AI requested role change via tag: [setrole:{target_role}] for chat {chat_id} ({chat_type})")
-                role_to_set = target_role if target_role.lower() != "default" else None
-                role_manager.set_active_role(chat_id, chat_type, role_to_set)
-                # 更新当前循环后续可能用到的 role_key_for_notes 
-                # 直接使用导入的常量 DEFAULT_ROLE_KEY
-                role_key_for_notes = role_to_set if role_to_set else DEFAULT_ROLE_KEY
-            silent_tags_processed = True
-        elif m.group("event"):
-            # 识别到事件触发标记
-            event_type = clean_matched_group(m.group("event_type"))
-            participants_str = clean_matched_group(m.group("participants"))
-            event_prompt = clean_matched_group(m.group("event_prompt"))
+                    note_id = notebook.add_note(content, role=role_for_processing)
+                    log.info(f"AI_Parser: 已为角色 '{role_for_processing}' 添加笔记，ID {note_id}。")
 
-            if not event_type or not event_prompt:
-                 print(f"[WARNING] 接收到无效的事件触发标记，事件类型或 Prompt 内容为空: {m.group(0)}")
-            elif chat_id and chat_type:
-                # 解析参与者列表，以逗号分隔
-                participants = [p.strip() for p in participants_str.split(',') if p.strip()]
-                # 如果参与者列表为空且是群聊，可以考虑获取群成员列表或将当前用户作为参与者，这里简化为只使用标记中的参与者
-                if not participants and chat_type == "private":
-                     # 私聊事件，默认参与者是当前用户
-                     participants = [chat_id]
-                     print(f"[DEBUG] 私聊事件，未指定参与者，默认为当前用户: {chat_id}")
-                elif not participants and chat_type == "group":
-                     print(f"[WARNING] 群聊事件未指定参与者: {m.group(0)}")
-                     pass
+            elif tag_type == "setrole":
+                new_role = content if content.lower() != "default" else None
+                log.info(f"AI_Parser: 检测到角色切换指令，准备将 chat {chat_id} 的角色设置为 '{new_role}'。")
+                role_manager.set_active_role(chat_id, chat_type, new_role)
+                log.info(f"AI_Parser: 已将 chat {chat_id} 的激活角色设置为 '{new_role}'。")
+            
+            elif tag_type == "event":
+                parts = content.split(":", 2)
+                if len(parts) == 3:
+                    evt_type, participants_str, prompt = parts
+                    participants = [p.strip() for p in participants_str.split(',') if p.strip()]
+                    event_manager.register_event(evt_type, participants, prompt, chat_id, chat_type)
+                    log.info(f"Registered event '{evt_type}' for participants {participants}.")
 
-                if participants:
-                    # 调用事件管理器注册事件
-                    registered_event_id = event_manager.register_event(
-                        event_type,
-                        participants,
-                        event_prompt,
-                        chat_id,
-                        chat_type
-                    )
-                    if registered_event_id:
-                        print(f"[INFO] 已触发并注册事件: ID {registered_event_id}, Type {event_type}, Participants {participants}")
-                    else:
-                         print(f"[WARNING] 事件注册失败，可能已有同聊天/参与者的活动事件。")
-                else:
-                     print(f"[WARNING] 事件触发标记解析后无有效参与者: {m.group(0)}")
+            elif tag_type == "event_end":
+                event_manager.remove_event(content)
+                log.info(f"Removed event with ID '{content}'.")
 
-            else:
-                print(f"[WARNING] 接收到事件触发标记但缺乏 chat_id 或 chat_type，无法注册事件: {m.group(0)}")
+        except Exception as e:
+            log.error(f"Error processing silent tag '{full_tag}': {e}", exc_info=True)
 
-            silent_tags_processed = True
-        elif m.group("event_end"):
-            event_id_to_remove = clean_matched_group(m.group("event_end_id"))
-            if event_id_to_remove:
-                if event_manager.remove_event(event_id_to_remove):
-                    print(f"[INFO] 已通过标记结束事件: ID {event_id_to_remove}")
-                else:
-                    print(f"[WARNING] 尝试通过标记结束不存在的事件: ID {event_id_to_remove}")
-            else:
-                print(f"[WARNING] 接收到无效的事件结束标记，事件 ID 为空: {m.group(0)}")
-            silent_tags_processed = True
+    cleaned_text = SILENT_TAG_PATTERN.sub("", text).strip()
+    if len(cleaned_text) < len(text):
+        log.debug(f"AI_Parser: 移除静默标记后的文本: \"{cleaned_text}\"")
+    return cleaned_text
 
-    # 2) 移除所有静默标记 (note, setrole, event, event_end)
-    cleaned_text = pattern.sub(
-        lambda m: "" if m.group("note") or m.group("setrole") or m.group("event") or m.group("event_end") else m.group(0),
-        text
-    )
-    if silent_tags_processed:
-        print(f"[Debug] Cleaned text after removing silent tags: {cleaned_text}")
 
-    # 3) 查找并移除第一个 reply 标记
-    should_reply = False
-    reply_id = None
-    reply_match = re.search(r"\[reply(?:\s*:\s*(\d+))?\]", cleaned_text)
-    if reply_match:
-        should_reply = True
-        reply_id = reply_match.group(1)
-        cleaned_text = re.sub(r"\[reply(?:\s*:\s*\d+)?\]", "", cleaned_text)
+async def _parse_visible_tags(
+    text: str,
+    message_id: Optional[str],
+    chat_id: str,
+    chat_type: str,
+    session: Optional[aiohttp.ClientSession]
+) -> List[MessageSegment]:
+    """
+    解析文本中的所有可见标记，并返回最终的消息段列表。
+    """
+    # 提前处理 [reply] 标记
+    reply_match = re.search(r"\[reply(?:\s*:\s*(\d+))?\]", text)
+    should_reply = bool(reply_match)
+    # 如果 [reply] 标签中指定了 ID，则使用它；否则，使用传入的 message_id
+    reply_to_id = reply_match.group(1) if reply_match and reply_match.group(1) else message_id
+    text = re.sub(r"\[reply(?:\s*:\s*\d+)?\]", "", text) # 移除 reply 标签
 
-    # 4) 处理剩余标签（at、music、poke、emoji）并构建段
-    matches = list(pattern.finditer(cleaned_text))
-    last_idx = 0
+    segments_placeholders: List[Optional[MessageSegment]] = []
     music_tasks = []
-    music_indices = {}
+    music_indices: Dict[int, int] = {}
+    last_idx = 0
 
-    async with aiohttp.ClientSession() as session:
-        for i, m in enumerate(matches):
+    session_manager = session if session else aiohttp.ClientSession()
+    
+    try:
+        for i, m in enumerate(VISIBLE_TAG_PATTERN.finditer(text)):
             if m.start() > last_idx:
-                seg_text = cleaned_text[last_idx:m.start()].strip()
-                if seg_text:
-                    segments_placeholders.append({
-                        "type": "text", "data": {"text": seg_text}
-                    })
+                segments_placeholders.append({"type": "text", "data": {"text": text[last_idx:m.start()]}})
 
-            if m.group("at1") or m.group("at2"):
-                qq = m.group("at_qq1") or m.group("at_qq2")
-                segments_placeholders.append({
-                    "type": "at", "data": {"qq": qq}
-                })
-            elif m.group("music"):
-                query = clean_matched_group(m.group("music_query"))
-                if query:
-                    placeholder_index = len(segments_placeholders)
-                    segments_placeholders.append(None)
-                    task_index = len(music_tasks)
-                    music_tasks.append(fetch_music_data(session, query))
-                    music_indices[task_index] = placeholder_index
+            tag_full = m.group(0)
+            # 使用更安全的分割方式
+            parts = tag_full[1:-1].split(":", 1)
+            tag_type = parts[0]
+            content = parts[1] if len(parts) > 1 else ""
+            
+            if tag_type == "reply": # 跳过已处理的 reply 标签
+                continue
+
+            if tag_type in ("@qq", "CQ:at,qq="):
+                qq = re.search(r'\d+', content).group(0)
+                segments_placeholders.append({"type": "at", "data": {"qq": qq}})
+            
+            elif tag_type == "poke":
+                qq = re.search(r'\d+', content).group(0)
+                segments_placeholders.append({"type": "poke", "data": {"qq": qq}})
+                
+            elif tag_type == "emoji":
+                emoji_id = _clean_tag_content(content)
+                emoji = emoji_storage.find_emoji_by_id(emoji_id)
+                if emoji:
+                    segments_placeholders.append({"type": "image", "data": {"file": emoji["file"], "url": emoji["url"]}})
                 else:
-                    segments_placeholders.append({
-                        "type": "text", "data": {"text": "[music:] 标签内容为空"}
-                    })
-            elif m.group("poke"):
-                if chat_type != "group":
-                    segments_placeholders.append({
-                        "type": "text", "data": {"text": "[poke] 标签仅支持在群聊中使用"}
-                    })
-                else:
-                    segments_placeholders.append({
-                        "type": "poke", "data": {"qq": m.group("poke_qq")}
-                    })
-            elif m.group("emoji"):
-                emoji_id = clean_matched_group(m.group("emoji_id"))
-                if emoji_id:
-                    emoji = emoji_storage.find_emoji_by_id(emoji_id)
-                    if emoji:
-                        segments_placeholders.append({
-                            "type": "image",
-                            "data": {
-                                "file": emoji["file"],
-                                "url": emoji["url"],
-                                "emoji_id": emoji["emoji_id"],
-                                "emoji_package_id": emoji["emoji_package_id"]
-                            }
-                        })
-                    else:
-                        segments_placeholders.append({
-                            "type": "text",
-                            "data": {"text": f"[未找到该表情包喵: {emoji_id}]"}
-                        })
-                else:
-                    segments_placeholders.append({
-                        "type": "text",
-                        "data": {"text": "[emoji:] 标签内容为空喵"}
-                    })
+                    segments_placeholders.append({"type": "text", "data": {"text": f"[emoji not found: {emoji_id}]"}})
+
+            elif tag_type == "music":
+                query = _clean_tag_content(content)
+                placeholder_idx = len(segments_placeholders)
+                segments_placeholders.append(None) # 占位
+                task_idx = len(music_tasks)
+                music_tasks.append(fetch_music_data(session_manager, query))
+                music_indices[task_idx] = placeholder_idx
+
+            elif tag_type == "longtext":
+                # 直接提取内容，保留换行符
+                long_text_content = content 
+                segments_placeholders.append({"type": "text", "data": {"text": long_text_content}})
+
 
             last_idx = m.end()
 
-        # 收尾的文本
-        if last_idx < len(cleaned_text):
-            seg_text = cleaned_text[last_idx:].strip()
-            if seg_text:
-                segments_placeholders.append({
-                    "type": "text", "data": {"text": seg_text}
-                })
+        if last_idx < len(text):
+            segments_placeholders.append({"type": "text", "data": {"text": text[last_idx:]}})
 
-        # 并行执行音乐查询
         if music_tasks:
             music_results = await asyncio.gather(*music_tasks, return_exceptions=True)
             for idx, result in enumerate(music_results):
-                placeholder_index = music_indices[idx]
+                placeholder_idx = music_indices[idx]
                 if isinstance(result, Exception):
-                    print(f"[Debug] 音乐任务异常: {result}")
-                    segments_placeholders[placeholder_index] = {
-                        "type": "text",
-                        "data": {"text": "处理音乐请求时发生内部错误，请上报管理员喵"}
-                    }
+                    log.error(f"Music task failed: {result}")
+                    segments_placeholders[placeholder_idx] = {"type": "text", "data": {"text": "[Music search failed]"}}
                 else:
-                    segments_placeholders[placeholder_index] = result
+                    segments_placeholders[placeholder_idx] = result
+    finally:
+        if not session:
+            await session_manager.close()
 
-    # 过滤掉 None
-    final_segments: List[MessageSegment] = [
-        seg for seg in segments_placeholders if seg is not None
-    ]
+    final_segments = [seg for seg in segments_placeholders if seg and seg.get("data", {}).get("text", True)]
+
+    processed_segments: List[MessageSegment] = []
+    for i, seg in enumerate(final_segments):
+        processed_segments.append(seg)
+        if seg["type"] == "at" and i + 1 < len(final_segments) and final_segments[i+1]["type"] == "text":
+            next_text_seg = final_segments[i+1]["data"]
+            if not next_text_seg.get("text", "").startswith(" "):
+                next_text_seg["text"] = " " + next_text_seg.get("text", "")
     
-    # 5) 如果需要回复，插入 reply 段
-    if final_segments and should_reply:
-        reply_data: Dict[str, Any] = {}
-        if reply_id:
-            reply_data["id"] = int(reply_id)
-        elif current_msg_id is not None:
-            reply_data["id"] = current_msg_id
-        final_segments.insert(0, {"type": "reply", "data": reply_data})
-
-    return final_segments
+    if should_reply and reply_to_id:
+        processed_segments.insert(0, {"type": "reply", "data": {"id": str(reply_to_id)}})
+        
+    return processed_segments

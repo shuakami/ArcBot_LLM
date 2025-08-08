@@ -147,32 +147,66 @@ def get_active_role(chat_id: str, chat_type: str) -> Optional[str]:
     state_key = (chat_id, chat_type)
     return active_roles.get(state_key)
 
-def get_active_role_prompt(chat_id: str, chat_type: str) -> Optional[str]:
-    """获取当前激活角色的 Prompt"""
-    role_name = get_active_role(chat_id, chat_type)
-    if role_name:
+def get_active_role_prompt(chat_id: str, chat_type: str, role_name_override: Optional[str] = None) -> Optional[str]:
+    """获取当前激活角色的 Prompt，或根据提供的名称获取特定角色的 Prompt"""
+    role_name_to_use = role_name_override if role_name_override is not None else get_active_role(chat_id, chat_type)
+    
+    if role_name_to_use:
         roles = load_roles()
-        return roles.get(role_name) # 如果角色被删了，这里会返回 None
+        return roles.get(role_name_to_use)
     return None
 
 def get_role_selection_prompt() -> str:
     """生成包含角色列表和切换指令的系统提示片段"""
     role_names = get_role_names()
-    if not role_names:
-        return "" # 没有自定义角色时，不添加任何提示
     
-    prompt = "\n\n角色切换指令\n"
-    prompt += "你可以根据对话内容、氛围或自己的状态（比如快睡觉了、受到攻击、不开心或者...），在合适的时机切换到不同的角色来回应。"
-    prompt += "可用角色列表：\n"
-    prompt += " - 默认(Saki&Nya)\n"
-    prompt += "\n".join(f" - {name}" for name in role_names)
-    prompt += "\n\n切换角色时，请在你的回复中（单独一行或与其他内容一起）使用以下内部标记：\n"
-    prompt += "`[setrole:角色名称]` 或 `[setrole:default]`\n"
-    prompt += "例如：要切换到角色'默认（Saki&Nya）'，使用 `[setrole:default]`\n"
-    prompt += "切换是内部操作，用户不会看到这个标记。请自然地完成角色转换。"
-    prompt += "请不要过于频繁地切换角色。"
-    prompt += "\n"
-    return prompt
+    # 全局的功能性指令提示
+    function_instructions = """
+功能指令核心思想：
+你不仅仅是一个聊天机器人，你拥有与QQ环境交互的特殊能力。这些指令是你的“超能力”，善用它们能让你的角色更生动，与用户的互动更真实。请在自然的对话中“思考”并使用它们，而不是生硬地执行。
+
+- 音乐卡片 [music:歌曲名-歌手]:
+  - 使用时机：当用户明确提出想听歌，或对话自然地聊到音乐时。这是一个分享情感、营造氛围的好方法。
+  - 注意：不要在不相关的话题里乱发音乐。
+
+- 永久记忆 [note:内容]:
+  - 使用时机：当你了解到关于用户的关键信息（名字、喜好、重要的事），或者某段对话让你产生了深刻的“感触”，希望在未来能记起时。
+  - 注意：这是一个无声的内部动作，用于你自己的成长。
+
+- 戳一戳 [poke:QQ号]:
+  - 使用时机：在群聊中，作为一种俏皮的、吸引注意力的互动。比如叫人、开玩笑”
+  - 思考过程：“Felix澄好久没说话了，我去逗逗他。” -> 生成 “[@qq:2049374069] 在干嘛喵”
+  - 注意：这是一种社交行为，请根据你当前扮演角色的性格（比如Nya可能会更常用）和群聊氛围来决定是否使用，切忌滥用。
+
+- @功能 [@qq:QQ号] 和 回复功能 [reply]:
+  - 使用时机：这两个指令用于明确你的“对话焦点”。在群聊中，用`@`来指定你想对谁说话；
+  用`[reply]`来表示你的发言是紧接着上一条消息的直接回应（你要专门回复的时候）。
+"""
+
+    # 角色切换说明
+    role_selection_instructions = """
+角色切换核心思想：
+切换角色是你人格魅力的核心。这不仅仅是改变说话方式，更是改变你看待和回应世界的视角。
+
+- 切换时机：
+  - 情感驱动：当某个角色的情感（如Nya的兴奋、Saki的冷静）与当前对话情景高度契合时。
+  - 氛围变化：当对话从轻松愉快转向需要认真讨论时（Saki出场），或者从严肃话题变得需要活跃气氛时（Nya的机会！）。
+  - 解决问题：当一个角色的能力更适合处理当前状况时（比如Nya搞砸了，Saki出来控场）。
+
+- 如何自然切换：
+  - 格式：在回复中带上 `[setrole:角色名]` 或 `[setrole:default]` 标记。
+  - 表现：切换标记发出后，你的下一句话就必须完全进入新角色的状态。
+"""
+    
+    # 动态添加可用角色列表
+    if role_names:
+        role_list_str = "\n".join(f"    - {name}" for name in role_names)
+        role_selection_instructions += (
+            f"\n- 可用角色：\n    - 默认(Saki&Nya)\n{role_list_str}"
+        )
+
+    final_prompt = function_instructions + "\n" + role_selection_instructions
+    return final_prompt.strip()
 
 # 待审核角色管理
 def _load_pending_roles() -> Dict[str, Dict]:

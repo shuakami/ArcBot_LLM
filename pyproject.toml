@@ -1,0 +1,37 @@
+[project]
+name = "ArcBot_LLM"
+version = "0.1.0"
+description = "A QQ bot powered by large language models."
+authors = [{ name = "Your Name", email = "your@email.com" }]
+requires-python = ">=3.8"
+dependencies = [
+    "requests",
+    "websockets",
+    "dashscope",
+    "aiohttp",
+    "rich",
+    "packaging"
+]
+
+[tool.setuptools]
+packages = ["adapters", "common", "core", "handlers", "messaging", "security", "storage"]
+
+[tool.ruff]
+# 选择要启用的规则集。
+# F: pyflakes (包含 F401 - 未使用的导入)
+# I: isort (导入排序)
+select = ["F", "I", "B", "PL"]
+
+# 忽略特定的规则
+# E501: 行长度过长 (通常不影响功能，可以通过格式化工具处理)
+# W292: 文件末尾没有新行 (不影响功能)
+# W293: 尾随空格 (不影响功能)
+# N801, N802, N803, N806: 变量命名规范 (如果你有自己的命名习惯，可以忽略)
+ignore = ["E501", "W292", "W293", "N801", "N802", "N803", "N806"]
+
+# 配置 isort
+[tool.ruff.isort]
+known-first-party = ["adapters", "common", "config", "core", "handlers", "llm_api", "llm", "logger", "main", "messaging", "security", "storage", "updater"]
+known-third-party = []
+sections = ["future", "standard-library", "third-party", "first-party", "local-folder"]
+combine-as-imports = true

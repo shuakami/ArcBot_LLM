@@ -128,7 +128,7 @@ class EmojiStorage:
         ])
 
         prompt = f"\n\n当前可用表情包 (共 {len(current_emojis_to_show)} 个):\n"
-        prompt += "Nya & Saki可以在对话中使用表情包来提升回复的趣味性，但一定要注意表情包的适当、合理使用。\n"
+        prompt += "可以在对话中使用表情包来提升回复的趣味性，但一定要注意表情包的适当、合理使用。\n"
         prompt += "每个表情包的格式为：表情包描述 (ID: 表情包ID)\n"
         prompt += current_emoji_list_str
         prompt += "\n\n使用表情包时，请使用[emoji:表情包ID]的格式。例如：[emoji:0c6e51da3431db3b34be8df446592b4f]"
