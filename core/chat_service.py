@@ -5,6 +5,7 @@ from adapters.base import AbstractAdapter
 from core.event_bus import event_bus
 from llm import process_conversation
 from messaging.ai_parser import parse_ai_message_to_segments
+from storage.message_context import message_context_manager
 from logger import log
 from config import config
 import core.role_manager as role_manager
@@ -61,6 +62,23 @@ class ChatService:
 
         content_for_ai = _render_message_for_ai(message_segments, self_id)
 
+        # 存储所有接收到的消息到上下文管理器（不管是否触发AI回复）
+        try:
+            message_context_manager.add_message(
+                chat_id=chat_id,
+                chat_type=chat_type,
+                user_id=user_id,
+                username=username,
+                message_id=message_id,
+                content=content_for_ai,
+                raw_content=raw_content,
+                message_segments=message_segments,
+                timestamp=timestamp
+            )
+            log.debug(f"消息已存储到上下文管理器: {chat_id} - {username}: {content_for_ai[:50]}...")
+        except Exception as storage_err:
+            log.error(f"存储消息到上下文管理器失败: {storage_err}")
+
         if chat_type == 'group':
             is_mentioned = any(
                 seg.get("type") == "at" and str(seg.get("data", {}).get("qq")) == self_id
@@ -94,7 +112,7 @@ class ChatService:
         log.debug(f"ChatService: 准备传入 process_conversation 的参数 - chat_id: {chat_id}, chat_type: {chat_type}, active_role_name: '{active_role}'")
         try:
             # 将 active_role 传递给 process_conversation
-            for segment_text in process_conversation(chat_id, ai_input, chat_type=chat_type, active_role_name=active_role):
+            for segment_text in process_conversation(chat_id, ai_input, chat_type=chat_type, active_role_name=active_role, self_id=self_id):
                 log.debug(f"ChatService: 从 process_conversation 接收到 AI segment: \"{segment_text}\"")
                 log.debug(f"ChatService: 准备传入 parse_ai_message_to_segments 的参数 - active_role_name: '{active_role}'")
                 parsed_segments = await parse_ai_message_to_segments(
@@ -102,7 +120,8 @@ class ChatService:
                     message_id=message_id,
                     chat_id=chat_id,
                     chat_type=chat_type,
-                    active_role_name=active_role
+                    active_role_name=active_role,
+                    self_id=self_id
                 )
                 
                 if parsed_segments:

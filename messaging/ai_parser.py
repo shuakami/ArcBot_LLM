@@ -15,7 +15,7 @@ from logger import log
 
 # 匹配所有静默标记，用于第一轮清理
 SILENT_TAG_PATTERN = re.compile(
-    r"\[(note|setrole|event|event_end):.*?\]", re.DOTALL
+    r"\[(note|setrole|event|event_end|get_context):.*?\]", re.DOTALL
 )
 
 # 匹配所有可见的功能标记
@@ -39,7 +39,8 @@ async def parse_ai_message_to_segments(
     chat_id: Optional[str] = None,
     chat_type: str = "private",
     active_role_name: Optional[str] = None,
-    session: Optional[aiohttp.ClientSession] = None
+    session: Optional[aiohttp.ClientSession] = None,
+    self_id: Optional[str] = None
 ) -> List[MessageSegment]:
     """
     解析AI输出，将结构化标记转为MessageSegment。
@@ -52,7 +53,7 @@ async def parse_ai_message_to_segments(
         return [{"type": "text", "data": {"text": text}}] if text else []
 
     # 步骤 1: 处理静默标记
-    cleaned_text = await _handle_silent_tags(text, chat_id, chat_type, active_role_name)
+    cleaned_text = await _handle_silent_tags(text, chat_id, chat_type, active_role_name, self_id)
 
     if not cleaned_text.strip():
         log.debug("AI_Parser: 清理静默标记后文本为空，解析结束。")
@@ -66,7 +67,7 @@ async def parse_ai_message_to_segments(
     return segments
 
 
-async def _handle_silent_tags(text: str, chat_id: str, chat_type: str, active_role_name: Optional[str]) -> str:
+async def _handle_silent_tags(text: str, chat_id: str, chat_type: str, active_role_name: Optional[str], self_id: Optional[str] = None) -> str:
     """
     查找并处理所有静默标记，返回一个移除了这些标记的干净文本。
     """
@@ -106,6 +107,10 @@ async def _handle_silent_tags(text: str, chat_id: str, chat_type: str, active_ro
             elif tag_type == "event_end":
                 event_manager.remove_event(content)
                 log.info(f"Removed event with ID '{content}'.")
+            
+            elif tag_type == "get_context":
+                # get_context 工具调用已在 llm.py 中处理，这里只需要移除标记
+                log.debug(f"AI_Parser: 发现 get_context 标记，已在LLM层处理: {content}")
 
         except Exception as e:
             log.error(f"Error processing silent tag '{full_tag}': {e}", exc_info=True)

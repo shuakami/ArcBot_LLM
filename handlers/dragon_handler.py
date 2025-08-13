@@ -55,11 +55,11 @@ async def handle_dragon_logic(group_id: str, self_id: str, sender: IMessageSende
                 disrupt_prompt = f'群里现在好多人在复读刷屏这条消息："{last_text}"。请你回复一句与众不同或者看似接龙但是有错别字的话，来打断或者终结这个无聊的刷屏行为。'
                 
                 message_id = str(int(time.time()))
-                for segment_text in process_conversation(group_id, disrupt_prompt, chat_type="group"):
+                for segment_text in process_conversation(group_id, disrupt_prompt, chat_type="group", self_id=self_id):
                     try:
                         log.debug(f"AI 打乱回复片段: {segment_text}")
                         msg_segments = await parse_ai_message_to_segments(
-                            segment_text, int(message_id), chat_id=group_id, chat_type="group"
+                            segment_text, message_id=int(message_id), chat_id=group_id, chat_type="group", self_id=self_id
                         )
                         if msg_segments:
                             sender.send_group_msg(int(group_id), msg_segments)

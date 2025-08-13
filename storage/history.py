@@ -90,11 +90,15 @@ def load_conversation_history(id_str: str, chat_type: str = "private", active_ro
             # 根据角色筛选加载的历史记录
             role_to_use = active_role_name if active_role_name is not None else role_manager.get_active_role(id_str, chat_type)
             if role_to_use and role_to_use != DEFAULT_ROLE_KEY:
-                # 只加载当前角色的对话
-                filtered_history = [msg for msg in file_history if msg.get("role") != "system" and msg.get("role_marker") == role_to_use]
+                # 只加载当前角色的对话，但保留重要的系统消息（如工具调用结果）
+                filtered_history = [msg for msg in file_history if 
+                                   (msg.get("role") == "system" and "[系统内部]" in msg.get("content", "")) or  # 保留工具调用系统消息
+                                   (msg.get("role") != "system" and msg.get("role_marker") == role_to_use)]
             else:
-                # 对于默认角色，加载不带特定role_marker或标记为default的历史
-                filtered_history = [msg for msg in file_history if msg.get("role") != "system" and msg.get("role_marker") in [None, DEFAULT_ROLE_KEY]]
+                # 对于默认角色，加载不带特定role_marker或标记为default的历史，但保留重要的系统消息
+                filtered_history = [msg for msg in file_history if 
+                                   (msg.get("role") == "system" and "[系统内部]" in msg.get("content", "")) or  # 保留工具调用系统消息
+                                   (msg.get("role") != "system" and msg.get("role_marker") in [None, DEFAULT_ROLE_KEY])]
 
             if filtered_history:
                 history.extend(filtered_history)
