@@ -40,14 +40,16 @@ class WebSocketSender(IMessageSender):
         self._websocket = websocket
 
     async def _send(self, payload: dict):
+        log.info(f"🚀 WebSocketSender._send 被调用，payload action: {payload.get('action')}")
         if not self._websocket:
-            log.error("WebSocket is not connected, cannot send message.")
+            log.error("❌ WebSocket is not connected, cannot send message.")
             return
         try:
             # 使用 pretty print 格式化日志输出
             pretty_payload = json.dumps(payload, indent=2, ensure_ascii=False)
-            log.debug(f"Sending Payload:\n{pretty_payload}")
+            log.info(f"📤 即将发送WebSocket消息:\n{pretty_payload}")
             await self._websocket.send(json.dumps(payload))
+            log.info(f"✅ WebSocket消息发送成功: {payload.get('action')}")
         except Exception as e:
             log.error(f"Failed to send message via WebSocket: {e}", exc_info=True)
 
@@ -102,4 +104,34 @@ class WebSocketSender(IMessageSender):
                 "remark": remark
             }
         }
+        await self._send(payload)
+
+    async def get_group_msg_history(self, group_id: int, message_seq: Optional[str] = None, count: int = 20, reverse_order: bool = False, echo: Optional[str] = None):
+        """获取群消息历史记录。
+        
+        Args:
+            group_id: 群号
+            message_seq: 消息序号，可选
+            count: 获取数量，默认20
+            reverse_order: 是否倒序，默认False
+            echo: 回显标识符，用于标识响应
+            
+        Returns:
+            发送请求到WebSocket，响应需要在消息处理中接收
+        """
+        params = {
+            "group_id": group_id,
+            "count": count,
+            "reverseOrder": reverse_order
+        }
+        if message_seq is not None:
+            params["message_seq"] = message_seq
+            
+        payload = {
+            "action": "get_group_msg_history",
+            "params": params
+        }
+        if echo is not None:
+            payload["echo"] = echo
+            
         await self._send(payload)

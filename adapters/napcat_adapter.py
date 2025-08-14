@@ -12,6 +12,7 @@ from logger import log
 from .napcat.message_sender import WebSocketSender
 from .napcat.command_handler import process_command
 from .napcat import friend_manager as friend_manager
+from storage.napcat_history import napcat_history_manager
 
 class NapcatAdapter(AbstractAdapter):
     """Napcat 平台的适配器。"""
@@ -23,6 +24,7 @@ class NapcatAdapter(AbstractAdapter):
         self._sender = WebSocketSender()
         self._is_stopping = False
         friend_manager.set_sender(self._sender)
+        napcat_history_manager.set_sender(self._sender)
 
     def _get_connect_uri(self) -> str:
         """将 access_token 作为查询参数附加到 WebSocket URI。"""
@@ -109,10 +111,28 @@ class NapcatAdapter(AbstractAdapter):
         try:
             msg = json.loads(raw_message)
 
-            # --- 好友列表响应处理 ---
-            if msg.get('echo', '').startswith('get_friend_list'):
+            # --- API响应处理 ---
+            echo_id = msg.get('echo', '')
+            
+            # 历史消息响应处理（兼容好友列表模式）
+            if echo_id.startswith('get_context_') or echo_id.startswith('bulk_search_'):
+                log.info(f"📥 收到历史消息响应，echo={echo_id}, status={msg.get('status')}")
                 if msg.get('status') == 'ok' and msg.get('data'):
-                    friend_manager.handle_friend_list_response(msg['echo'], msg['data'])
+                    napcat_history_manager.handle_history_response(msg['echo'], msg['data'])
+                else:
+                    log.error(f"❌ 获取历史消息失败: {msg.get('message', '未知错误')}")
+                    napcat_history_manager.handle_history_response(msg['echo'], {})
+                return
+            
+            # 好友列表响应处理
+            if echo_id.startswith('get_friend_list_'):
+                log.info(f"📥 收到好友列表响应，echo={echo_id}, status={msg.get('status')}")
+                if msg.get('status') == 'ok' and msg.get('data'):
+                    from adapters.napcat.friend_manager import handle_friend_list_response
+                    friends_data = msg.get('data', [])
+                    handle_friend_list_response(echo_id, friends_data)
+                else:
+                    log.error(f"❌ 获取好友列表失败: {msg.get('message', '未知错误')}")
                 return
             
             if msg.get("post_type") != "message":
