@@ -8,14 +8,13 @@ from storage.notebook import notebook, DEFAULT_ROLE_KEY
 from handlers.music_handler import fetch_music_data
 from storage.emoji_storage import emoji_storage
 import core.role_manager as role_manager
-import core.event_manager as event_manager
 from logger import log
 
 # --- 预编译的正则表达式 ---
 
 # 匹配所有静默标记，用于第一轮清理
 SILENT_TAG_PATTERN = re.compile(
-    r"\[(note|setrole|event|event_end|get_context):.*?\]", re.DOTALL
+    r"\[(note|setrole|get_context):.*?\]", re.DOTALL
 )
 
 # 匹配所有可见的功能标记
@@ -96,17 +95,6 @@ async def _handle_silent_tags(text: str, chat_id: str, chat_type: str, active_ro
                 role_manager.set_active_role(chat_id, chat_type, new_role)
                 log.info(f"AI_Parser: 已将 chat {chat_id} 的激活角色设置为 '{new_role}'。")
             
-            elif tag_type == "event":
-                parts = content.split(":", 2)
-                if len(parts) == 3:
-                    evt_type, participants_str, prompt = parts
-                    participants = [p.strip() for p in participants_str.split(',') if p.strip()]
-                    event_manager.register_event(evt_type, participants, prompt, chat_id, chat_type)
-                    log.info(f"Registered event '{evt_type}' for participants {participants}.")
-
-            elif tag_type == "event_end":
-                event_manager.remove_event(content)
-                log.info(f"Removed event with ID '{content}'.")
             
             elif tag_type == "get_context":
                 # get_context 工具调用已在 llm.py 中处理，这里只需要移除标记

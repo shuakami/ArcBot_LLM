@@ -6,6 +6,7 @@ from storage.notebook import DEFAULT_ROLE_KEY
 from storage.napcat_history import napcat_history_manager
 from logger import log, log_llm_context
 from core.prompt_builder import build_system_prompt
+from tools import tool_registry
 
 
 def process_conversation(chat_id, user_input, chat_type="private", active_role_name=None, self_id=None):
@@ -71,7 +72,19 @@ def _process_conversation_with_tools(history, role_key, chat_id, chat_type, acti
                 full_response = "".join(response_segments)
                 
                 # 实时检查是否有工具调用，如果有就不继续输出
-                tool_info = _check_for_tool_calls_sync(full_response, chat_id, chat_type, active_role_name, self_id)
+                tool_call_context = {
+                    "chat_id": chat_id,
+                    "chat_type": chat_type, 
+                    "active_role_name": active_role_name,
+                    "self_id": self_id
+                }
+                tool_result = tool_registry.find_tool_call(full_response)
+                if tool_result:
+                    tool, match_info = tool_result
+                    tool_info = {"type": tool.name, "tool_object": tool, "match_info": match_info, "context": tool_call_context}
+                else:
+                    tool_info = None
+                
                 if tool_info is not None:
                     tool_type = tool_info.get("type", "unknown")
                     log.info(f"LLM: 检测到工具调用: {tool_type}")
@@ -87,7 +100,7 @@ def _process_conversation_with_tools(history, role_key, chat_id, chat_type, acti
                             # 添加工具调用结果作为系统消息
                             tool_call_message = {
                                 "role": "system", 
-                                "content": f"[系统内部] 以下是获取到的相关记录：\n{context_data}\n\n现在请你基于这些历史信息，用自然的对话方式回答用户的问题。\n\n【严格禁止复读】以下内容绝对不能出现在你的回复中：\n1. 任何[系统内部]、【获取到的聊天上下文】、【搜索结果】、【搜索结束】、【上下文结束】等系统标记\n2. 任何[用户:xxx]、[群:xxx]、[时间:xxx]格式的原始记录\n3. 当前用户输入的重复内容\n4. 这些历史记录的原始格式化内容或系统注入的文本\n5. 任何工具调用相关的信息或格式化输出\n6. 相关度数字、时间戳等搜索结果的技术信息\n\n【正确做法】请基于上述历史信息，以Saki和Nya的自然对话形式回答，就像她们回忆起了相关内容一样，不要提及任何系统标记或格式化信息。",
+                                "content": f"[系统内部] 以下是获取到的相关信息：\n{context_data}\n\n现在请你基于这些信息，用自然的对话方式回答用户的问题。请基于上述历史信息，以Saki和Nya的自然对话形式回答，就像她们回忆起了相关内容一样，不要提及任何系统标记或格式化信息。",
                                 "role_marker": role_key
                             }
                             history.append(tool_call_message)
@@ -145,167 +158,42 @@ def _process_conversation_with_tools(history, role_key, chat_id, chat_type, acti
                 return
 
 
-async def _check_for_tool_calls_async(text: str, chat_id: str, chat_type: str, active_role_name: str = None, self_id: str = None):
-    """
-    异步版本的工具调用检测函数
-    返回: (context_data, tool_info) 如果检测到工具调用，否则返回 (None, None)
-    """
-    # 1. 检查 get_context 工具调用
-    get_context_pattern = r'\[get_context:(\d+)\]'
-    get_match = re.search(get_context_pattern, text)
-    
-    if get_match:
-        count = int(get_match.group(1))
-        log.info(f"LLM: 检测到get_context工具调用，请求 {count} 条上下文消息")
-        
-        try:
-            # 通过Napcat API获取最近的消息
-            recent_messages = await napcat_history_manager.get_recent_messages(
-                chat_id, count, exclude_self=True, self_id=self_id
-            )
-            
-            # 格式化上下文
-            context_data = napcat_history_manager.format_context_for_ai(recent_messages)
-            log.debug(f"LLM: 获取到上下文: {context_data[:200]}...")
-            
-            return context_data, {"type": "get_context", "count": count}
-            
-        except Exception as e:
-            log.error(f"LLM: 获取上下文时出错: {e}")
-            return None, None
-    
-    # 2. 检查 search_context 工具调用
-    # 支持格式: [search_context:关键词] 或 [search_context:关键词:天数]
-    search_pattern = r'\[search_context:([^:\]]+)(?::(\d+))?\]'
-    search_match = re.search(search_pattern, text)
-    
-    if search_match:
-        query = search_match.group(1).strip()
-        days = int(search_match.group(2)) if search_match.group(2) else 7  # 默认7天
-        
-        # 限制搜索范围
-        days = max(7, min(730, days))  # 7天到2年
-        
-        log.info(f"LLM: 检测到search_context工具调用，搜索 '{query}'，范围 {days} 天")
-        
-        try:
-            # 搜索聊天记录
-            search_results = await napcat_history_manager.search_context(
-                chat_id, query, days=days, max_results=15, self_id=self_id
-            )
-            
-            log.debug(f"LLM: 搜索完成: {search_results[:200]}...")
-            
-            return search_results, {"type": "search_context", "query": query, "days": days}
-            
-        except Exception as e:
-            log.error(f"LLM: 搜索聊天记录时出错: {e}")
-            return None, None
-    
-    return None, None
-
-
-def _check_for_tool_calls_sync(text: str, chat_id: str, chat_type: str, active_role_name: str = None, self_id: str = None):
-    """
-    同步版本的工具调用检测函数
-    返回: (tool_info) 如果检测到工具调用，否则返回 None
-    注意：这个函数只做检测，不执行实际的API调用
-    """
-    # 检查 get_context 工具调用
-    get_pattern = r'\[get_context:(\d+)\]'
-    get_match = re.search(get_pattern, text)
-    
-    if get_match:
-        count = int(get_match.group(1))
-        log.info(f"LLM: 检测到get_context工具调用，请求 {count} 条上下文消息")
-        return {"type": "get_context", "count": count, "chat_id": chat_id, "self_id": self_id}
-    
-    # 检查 search_context 工具调用
-    # 支持格式: [search_context:关键词] 或 [search_context:关键词:天数]
-    search_pattern = r'\[search_context:([^:\]]+)(?::(\d+))?\]'
-    search_match = re.search(search_pattern, text)
-    
-    if search_match:
-        query = search_match.group(1).strip()
-        days = int(search_match.group(2)) if search_match.group(2) else 7  # 默认7天
-        
-        # 限制搜索范围
-        days = max(7, min(730, days))  # 7天到2年
-        
-        log.info(f"LLM: 检测到search_context工具调用，搜索 '{query}'，范围 {days} 天")
-        return {"type": "search_context", "query": query, "days": days, "chat_id": chat_id, "self_id": self_id}
-    
-    return None
-
-
 def _execute_tool_call(tool_info):
     """
-    执行工具调用并返回结果数据
-    返回: 格式化的上下文数据，如果失败返回 None
+    使用新工具系统执行工具调用
     """
     import asyncio
     
-    tool_type = tool_info.get("type")
-    chat_id = tool_info.get("chat_id")
-    self_id = tool_info.get("self_id")
-    
     try:
-        if tool_type == "get_context":
-            count = tool_info.get("count", 20)
-            log.debug(f"LLM: 执行get_context工具调用，获取 {count} 条消息")
-            
-            # 直接在当前上下文中执行，避免创建新线程和事件循环
-            # 这样WebSocket响应可以正确传递到waiting协程
-            try:
-                import nest_asyncio
-                nest_asyncio.apply()  # 允许嵌套事件循环
-            except ImportError:
-                log.warning("nest_asyncio不可用，可能出现事件循环嵌套问题")
-            
-            async def get_context():
-                recent_messages = await napcat_history_manager.get_recent_messages(
-                    chat_id, count, exclude_self=True, self_id=self_id
-                )
-                return napcat_history_manager.format_context_for_ai(recent_messages)
-            
-            # 检查是否已经在事件循环中
-            try:
-                loop = asyncio.get_running_loop()
-                # 如果已在事件循环中，使用 nest_asyncio 支持嵌套
-                log.info(f"LLM: 检测到运行中的事件循环，使用嵌套执行")
-                return loop.run_until_complete(get_context())
-                    
-            except RuntimeError:
-                # 没有事件循环，可以直接使用 asyncio.run
-                log.info(f"LLM: 没有运行中的事件循环，创建新的事件循环")
-                return asyncio.run(get_context())
-            
-        elif tool_type == "search_context":
-            query = tool_info.get("query", "")
-            days = tool_info.get("days", 7)
-            log.debug(f"LLM: 执行search_context工具调用，搜索 '{query}'，范围 {days} 天")
-            
-            async def search_context():
-                return await napcat_history_manager.search_context(
-                    chat_id, query, days=days, max_results=15, self_id=self_id
-                )
-            
-            # 检查是否已经在事件循环中
-            try:
-                loop = asyncio.get_running_loop()
-                # 如果已在事件循环中，使用 nest_asyncio 支持嵌套
-                log.info(f"LLM: 检测到运行中的事件循环，使用嵌套执行搜索")
-                return loop.run_until_complete(search_context())
-                    
-            except RuntimeError:
-                # 没有事件循环，可以直接使用 asyncio.run
-                log.info(f"LLM: 没有运行中的事件循环，创建新的事件循环进行搜索")
-                return asyncio.run(search_context())
-            
-        else:
-            log.warning(f"LLM: 未知的工具调用类型: {tool_type}")
+        tool = tool_info.get("tool_object")
+        match_info = tool_info.get("match_info")
+        context = tool_info.get("context")
+        
+        if not tool or not match_info or not context:
+            log.error("_execute_tool_call: 缺少必要的工具信息")
             return None
+        
+        params = match_info["params"]
+        
+        async def execute_async():
+            result, success = await tool.execute(params, context)
+            return result if success else None
+        
+        # 处理异步执行
+        try:
+            import nest_asyncio
+            nest_asyncio.apply()
+        except ImportError:
+            log.warning("nest_asyncio不可用，可能出现事件循环嵌套问题")
+        
+        try:
+            loop = asyncio.get_running_loop()
+            log.info(f"LLM: 检测到运行中的事件循环，使用嵌套执行工具 '{tool.name}'")
+            return loop.run_until_complete(execute_async())
+        except RuntimeError:
+            log.info(f"LLM: 没有运行中的事件循环，创建新的事件循环执行工具 '{tool.name}'")
+            return asyncio.run(execute_async())
             
     except Exception as e:
-        log.error(f"LLM: 执行工具调用时出错: {e}")
+        log.error(f"LLM: 执行工具系统时出错: {e}")
         return None
