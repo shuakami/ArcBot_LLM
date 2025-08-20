@@ -181,16 +181,23 @@ def _execute_tool_call(tool_info):
         
         # 处理异步执行
         try:
-            import nest_asyncio
-            nest_asyncio.apply()
-        except ImportError:
-            log.warning("nest_asyncio不可用，可能出现事件循环嵌套问题")
-        
-        try:
+            # 检测是否在事件循环中
             loop = asyncio.get_running_loop()
             log.info(f"LLM: 检测到运行中的事件循环，使用嵌套执行工具 '{tool.name}'")
-            return loop.run_until_complete(execute_async())
+            
+            # 如果在事件循环中，尝试使用nest_asyncio
+            try:
+                import nest_asyncio
+                nest_asyncio.apply()
+                # 使用嵌套事件循环执行
+                return asyncio.run(execute_async())
+            except ImportError:
+                log.warning("nest_asyncio不可用，使用run_until_complete方式")
+                # 如果nest_asyncio不可用，使用run_until_complete
+                return loop.run_until_complete(execute_async())
+                
         except RuntimeError:
+            # 没有运行中的事件循环，可以安全使用asyncio.run
             log.info(f"LLM: 没有运行中的事件循环，创建新的事件循环执行工具 '{tool.name}'")
             return asyncio.run(execute_async())
             

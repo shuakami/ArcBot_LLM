@@ -10,7 +10,8 @@ dependencies = [
     "dashscope",
     "aiohttp",
     "rich",
-    "packaging"
+    "packaging",
+    "nest_asyncio"
 ]
 
 [tool.setuptools]
